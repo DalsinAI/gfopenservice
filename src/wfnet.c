@@ -114,6 +114,13 @@ static int passed(unsigned long now_ms, unsigned long when)
     return (long)(now_ms - when) >= 0;
 }
 
+/* Accept-Encoding with WFN_F_DECODE: what the decoders undo, or identity. */
+const char *wfn_accept(struct wfn *w)
+{
+    const char *a = w->io.dec_accept ? w->io.dec_accept(w->io.env) : NULL;
+    return a && *a ? a : "identity";
+}
+
 void wfn_info(struct wfn_fetch *f, const char *key, const char *value)
 {
     unsigned long kl = strlen(key), vl = strlen(value);
@@ -428,6 +435,7 @@ static void reset_answer(struct wfn *w, struct wfn_fetch *f)
         f->dec = NULL;
     }
     f->raw.len = f->raw.at = 0;
+    f->no_decoder = 0;
 }
 
 void wfn_fail(struct wfn *w, struct wfn_fetch *f, unsigned long error, const char *why)
@@ -687,14 +695,12 @@ int wfn_set_head(struct wfn *w, struct wfn_fetch *f, unsigned long status, unsig
     }
     /* Content-Encoding: through the decoder hook when there is one. */
     if ((f->flags & WFN_F_DECODE) && (v = wfn_hdr(lines, len, "content-encoding", &vl, NULL)) != NULL && vl
-        && !wfn_ieq(v, vl, "identity") && !cpy(coding, sizeof coding, v, vl)) {
-        if (w->io.dec_new && (f->dec = w->io.dec_new(w->io.env, coding)) != NULL)
+        && !wfn_ieq(v, vl, "identity")) {
+        if (!cpy(coding, sizeof coding, v, vl) && w->io.dec_new && (f->dec = w->io.dec_new(w->io.env, coding)) != NULL)
             drop_coding = 1;
         else
             f->no_decoder = 1;
     }
-    if ((f->flags & WFN_F_DECODE) && !f->dec)
-        f->no_decoder = 1;
     if (!(f->htext = zalloc(w, sl + len + 2)))
         return -1;
     memcpy(f->htext, sline, sl);
@@ -748,6 +754,8 @@ int wfn_set_head(struct wfn *w, struct wfn_fetch *f, unsigned long status, unsig
         wfn_info(f, "auth", f->auth_tried && f->pauth_tried ? "both" : f->auth_tried ? "server" : "proxy");
     if (f->no_decoder)
         wfn_info(f, "decode", "datatypes");
+    else if (f->dec)
+        wfn_info(f, "decode", w->io.dec_name ? w->io.dec_name(w->io.env, f->dec) : "yes");
     if (f->reused)
         wfn_info(f, "reused", "yes");
     f->head_ready = 1;
@@ -802,7 +810,7 @@ static int write_request(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
     else
         bad |= outs(w, c, "Connection: keep-alive\r\n");
     if (f->flags & WFN_F_DECODE)
-        bad |= outs(w, c, "Accept-Encoding: gzip, deflate, br\r\n");
+        bad |= outs(w, c, "Accept-Encoding: ") | outs(w, c, wfn_accept(w)) | outs(w, c, "\r\n");
     if (f->auth)
         bad |= outs(w, c, "Authorization: ") | outs(w, c, f->auth) | outs(w, c, "\r\n");
     if (f->forward && f->pauth)

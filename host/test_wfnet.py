@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = tempfile.mkdtemp(prefix="wfnet-")
@@ -68,8 +69,9 @@ WS_FIN, WS_END, WS_MORE = 0x10, 0x20, 0x80
 class Fetcher:
     """One struct wfn: a task's fetches, all moved on by any call."""
 
-    def __init__(self, window=65536, decoders=False):
-        self.w = LIB.wfnp_new(window, 1 if decoders else 0)
+    def __init__(self, window=65536, decoders=False, lib=None):
+        self.lib = lib or LIB
+        self.w = self.lib.wfnp_new(window, 1 if decoders else 0)
         assert self.w
 
     def call(self, op, arg=0, extra=(0, 0, 0, 0), inp=(), room=0):
@@ -89,7 +91,7 @@ class Fetcher:
             bufs[0].length = room
         ex = (UL * 4)(*extra)
         res, aux = UL(), UL()
-        st = LIB.wfnp_call(self.w, op, arg, ex, bufs, ctypes.byref(res), ctypes.byref(aux))
+        st = self.lib.wfnp_call(self.w, op, arg, ex, bufs, ctypes.byref(res), ctypes.byref(aux))
         return st, res.value, aux.value, (ctypes.string_at(bufs[0].out, bufs[0].written) if room else b"")
 
     def open(self, text, flags=0, length=0, timeout=0, body=None, ws=False):
@@ -133,7 +135,7 @@ class Fetcher:
         return hd, data, err
 
     def free(self):
-        LIB.wfnp_free(self.w)
+        self.lib.wfnp_free(self.w)
 
 
 def parse_head(b):
@@ -345,6 +347,8 @@ LOCK = threading.Lock()
 SEEN = {"ports": [], "proxy": [], "h2conns": 0, "h2streams": [], "ws_pong": []}
 TEXT = b"".join(b"Line %d of a page the Amiga asked for.\n" % i for i in range(3000))
 BIG = random.Random(7).randbytes(3 << 20)
+GZBIG = gzip.compress(BIG, 1)
+CODED = {}                                             # path: (body, Content-Encoding), for the datatypes' tests
 DIGEST_NONCE = "dcd98b7102dd2f0e8b11d0f600bfb0c093"
 
 
@@ -429,6 +433,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply(200, BIG)
         elif p == "/gzip":
             self.reply(200, gzip.compress(TEXT), [("Content-Encoding", "gzip")])
+        elif p in CODED:
+            self.reply(200, CODED[p][0], [("Content-Encoding", CODED[p][1])])
         elif p == "/redirect":
             self.reply(302, b"", [("Location", "/hello")])
         elif p == "/slow":
@@ -664,6 +670,8 @@ class H2Conn:
             data = "".join(f"{k}: {v}\n" for k, v in req.items()).encode()
         elif path == "/big":
             data = BIG
+        elif path == "/gzbig":
+            data = GZBIG
         elif path == "/echo":
             data = f"{len(body)} {hashlib.md5(body).hexdigest()}".encode()
         elif path.startswith("/slow") or path.startswith("/s"):
@@ -674,6 +682,8 @@ class H2Conn:
         cl = len(data) + (5 if path == "/short" else -5 if path == "/long" else 0)
         fields = [(":status", status), ("server", "pyh2"), ("content-type", "text/plain"),
                   ("content-length", str(cl)), ("x-stream", str(sid)), ("set-cookie", "s=1"), ("set-cookie", "t=2")]
+        if path == "/gzbig":
+            fields.append(("content-encoding", "gzip"))
         with self.lock:
             block = self.enc.encode(fields)          # encoded in the order sent, so the tables agree
             self.s.sendall(struct.pack(">I", len(block))[1:] + bytes([1, 4 | (1 if method == "HEAD" else 0)])
@@ -1168,7 +1178,15 @@ assert gzip.decompress(body) == TEXT and "decode=" not in hd["info"]
 D = Fetcher(decoders=True)
 hd, body, _ = D.fetch(f"{base}/gzip", flags=DECODE)
 assert body == TEXT and hd["flags"] & H_DECODED and "content-encoding" not in hd["headers"], hd
-print("Content-Encoding: passed on as sent (decode=datatypes when WF_DECODE has no decoder); through the hook when there is one")
+assert "decode=zlib" in hd["info"], hd["info"]
+hd, body, _ = F.fetch(f"{base}/hello", flags=DECODE)
+assert "decode=" not in hd["info"], hd["info"]                 # nothing to undo: nothing said
+# Accept-Encoding offers only what the decoders undo: identity with none, the caller's own dropped.
+assert "accept-encoding: identity\n" in F.fetch(f"{base}/headers", headers="Accept-Encoding: zstd\n", flags=DECODE)[1].decode().lower()
+assert "accept-encoding: gzip, deflate\n" in D.fetch(f"{base}/headers", flags=DECODE)[1].decode().lower()
+assert "accept-encoding: zstd\n" in F.fetch(f"{base}/headers", headers="Accept-Encoding: zstd\n")[1].decode().lower()
+print("Content-Encoding: passed on as sent (decode=datatypes when WF_DECODE has no decoder); through the hook when there "
+      "is one (decode=zlib); Accept-Encoding: identity with no decoder, what the hook undoes with one")
 
 # One task, many fetches, never blocking: every call with a wait of 0, and wfn_pump to sleep on all of them.
 LIB.wfnp_pump.argtypes = [ctypes.c_void_p, UL]
@@ -1457,6 +1475,189 @@ hd, body, _ = F.fetch(f"https://us%20er:pa%20ss@localhost:{HTTPS}/digest")
 assert hd["status"] == 200 and body == b"digest MD5 ok\n", hd
 print("auth: Basic, and Digest with MD5 and SHA-256 (a POST too, its body sent again), over HTTP and HTTPS; "
       "wrong credentials give the 401 back")
+
+# ---- compressed bodies through the datatypes: src/wfnet_dec.c over stream.datatype's core --------------
+# The Amiga's own glue, built with opendatatypes' portable cores (stream/sdtcore.c, gzip/gzcore.c on the
+# host's zlib in z.library's place, brotli/brdecode.c) behind host/wfnet_dt.c's NewDTObject() and methods.
+#   ODT         the opendatatypes checkout (default: beside this one); without it this part is skipped
+#   BROTLI_RFC  RFC 7932's text or its dictionary, for brotli.datatype's (fetched when missing; else no br)
+#   CFLAGS      more flags for that build (-fsanitize=address,undefined, with the runtime preloaded)
+
+ODT = os.environ.get("ODT") or os.path.join(HERE, "..", "..", "opendatatypes")
+DT = os.path.join(ODT, "Datatypes")
+if os.path.isfile(os.path.join(DT, "stream", "sdtcore.c")):
+    root = os.path.join(HERE, "..")
+    srcs = [os.path.join(root, f) for f in ("host/wfnet_posix.c", "host/wfnet_dt.c", "src/wfnet.c", "src/wfnet_h2.c",
+                                            "src/wfnet_hpack.c", "src/wfnet_auth.c", "src/wfnet_dec.c")]
+    srcs += [os.path.join(DT, f) for f in ("stream/sdtcore.c", "gzip/gzcore.c", "tests/zlhost.c")]
+    rfc = os.environ.get("BROTLI_RFC") or next((p for p in (os.path.join(ODT, "tarballs", "rfc7932.txt"),
+                                                            os.path.join(DT, "tarballs", "rfc7932.txt")) if os.path.isfile(p)), None)
+    if not rfc and subprocess.run(["curl", "-fsSL", "--retry", "2", "-o", f"{TMP}/rfc7932.txt",
+                                   "https://www.rfc-editor.org/rfc/rfc7932.txt"], capture_output=True).returncode == 0:
+        rfc = f"{TMP}/rfc7932.txt"
+    BR = bool(rfc) and subprocess.run([sys.executable, os.path.join(DT, "brotli", "mkbrdict.py"), rfc, f"{TMP}/brdict.c"],
+                                      capture_output=True).returncode == 0
+    if BR:
+        srcs += [os.path.join(DT, "brotli", "brdecode.c"), f"{TMP}/brdict.c"]
+    subprocess.run(["gcc", "-std=c99", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fPIC", "-shared", "-DWFNP_DATATYPES",
+                    "-DZLHOST_SYSTEM"] + (["-DWITH_BROTLI"] if BR else []) + [f"-I{root}/include", f"-I{root}/src"]
+                   + [f"-I{DT}/{d}" for d in ("tests/host", "common", "stream", "gzip", "brotli")]
+                   + os.environ.get("CFLAGS", "").split() + ["-o", f"{TMP}/libwfnet_dt.so"] + srcs
+                   + ["-lssl", "-lcrypto", "-lz"], check=True)
+    # The portable parts as the Amiga builds them: C99, warnings as errors, -Os, no writable data.
+    for f in ("wfnet", "wfnet_h2", "wfnet_hpack", "wfnet_auth", "wfnet_dec"):
+        subprocess.run(["gcc", "-std=c99", "-Os", "-Wall", "-Wextra", "-Werror", f"-I{root}/include", f"-I{root}/src", "-c",
+                        f"{root}/src/{f}.c", "-o", f"{TMP}/{f}.o"], check=True)
+        sec = subprocess.run(["size", "-A", f"{TMP}/{f}.o"], capture_output=True, text=True, check=True).stdout.split("\n")
+        assert not [l for l in sec if l.split()[:1] and l.split()[0].startswith((".data", ".bss")) and int(l.split()[1])], (f, sec)
+    DL = ctypes.CDLL(f"{TMP}/libwfnet_dt.so")
+    DL.wfnp_new.restype = ctypes.c_void_p
+    DL.wfnp_new.argtypes = [UL, ctypes.c_int]
+    DL.wfnp_call.restype = ctypes.c_long
+    DL.wfnp_call.argtypes = LIB.wfnp_call.argtypes
+    DL.wfnp_free.argtypes = [ctypes.c_void_p]
+    DL.wfnp_dt_live.restype = ctypes.c_long
+    DL.wfn_dec_new.restype = ctypes.c_void_p
+    DL.wfn_dec_new.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    DL.wfn_dec_run.restype = ctypes.c_long
+    DL.wfn_dec_run.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p, UL, ctypes.POINTER(UL), ctypes.c_char_p, UL,
+                               ctypes.c_int]
+    DL.wfn_dec_free.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    DL.wfn_dec_name.restype = ctypes.c_char_p
+    DL.wfn_dec_name.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+    def undo(coding, data, piece, room):
+        """The glue driven as wfnet drives it: pieces in, rooms out, then last until nothing more."""
+        d = DL.wfn_dec_new(None, coding.encode())
+        if not d:
+            return None
+        out, at, used, buf = [], 0, UL(), ctypes.create_string_buffer(room)
+        for _ in range(4 * len(data) + 4 * len(TEXT) + 100):
+            last = at >= len(data)
+            part = b"" if last else data[at:at + piece]
+            n = DL.wfn_dec_run(None, d, part, len(part), ctypes.byref(used), buf, room, int(last))
+            if n < 0:
+                DL.wfn_dec_free(None, d)
+                return "error"
+            out.append(buf.raw[:n])
+            at += used.value
+            if last and not n:
+                break
+        else:
+            raise AssertionError("stuck")
+        DL.wfn_dec_free(None, d)
+        return b"".join(out)
+
+    def deflate_raw(b):
+        c = zlib.compressobj(6, zlib.DEFLATED, -15)
+        return c.compress(b) + c.flush()
+
+    VEC = {}                                # opendatatypes' Brotli vectors, made with Google's encoder
+    with open(os.path.join(DT, "tests", "brotli-vectors.txt")) as f:
+        for line in f:
+            if line.strip() and not line.startswith("#"):
+                name, coded, plain = line.split()
+                VEC[name] = (bytes.fromhex(coded), b"" if plain == "-" else None if plain == "error" else bytes.fromhex(plain))
+    gz = gzip.compress(TEXT)
+    cases = [("gzip", gz, TEXT), ("x-gzip", gz, TEXT), ("GZIP", gzip.compress(b"a") + gzip.compress(b"b"), b"ab"),
+             ("deflate", zlib.compress(TEXT), TEXT), ("deflate", deflate_raw(TEXT), TEXT),
+             ("deflate, gzip", gzip.compress(zlib.compress(TEXT)), TEXT), ("identity, gzip", gz, TEXT),
+             ("gzip", gz[:len(gz) // 2], None), ("gzip", gz[:200] + bytes(64) + gz[264:], None), ("gzip", b"", b""),
+             ("deflate", b"", b""), ("compress", b"x", "refused"), ("gzip, gzip, gzip, gzip", b"x", "refused")]
+    if BR:
+        cases += [("br", VEC[v][0], VEC[v][1]) for v in ("vec-html-q11", "vec-repeat-w10", "vec-utf8-q9", "vec-empty-q11")]
+        cases += [("br, gzip", gzip.compress(VEC["vec-html-q11"][0]), VEC["vec-html-q11"][1]), ("br", VEC["vec-cut"][0], None)]
+    runs = 0
+    for coding, data, plain in cases:
+        for piece, room in ((65536, 65536), (1, 1), (7, 4096), (4096, 13)):
+            if piece == room == 1 and len(data) > 4000:
+                continue
+            got = undo(coding, data, piece, room)
+            if plain == "refused":
+                assert got is None, (coding, got)
+            elif plain is None:
+                assert got == "error", (coding, piece, room, got and got[:40])
+            else:
+                assert got == plain, (coding, piece, room, len(got) if isinstance(got, bytes) else got)
+            runs += 1
+    d = DL.wfn_dec_new(None, b"br, gzip" if BR else b"deflate, gzip")
+    assert DL.wfn_dec_name(None, d) == (b"gzip.datatype, brotli.datatype" if BR else b"gzip.datatype, gzip.datatype")
+    DL.wfn_dec_free(None, d)
+    assert DL.wfnp_dt_live() == 0
+    print(f"datatypes' glue: {runs} decodes of gzip, x-gzip, gzip members, zlib and raw deflate, two codings in a row"
+          f"{', Brotli and br then gzip' if BR else ''}, fed and taken whole and a byte at a time; damaged and cut short "
+          "fail; an empty body is no error; an unknown coding or more than three refused" + ("" if BR else
+          " (Brotli skipped: no RFC 7932 text, set BROTLI_RFC)"))
+
+    # Through the transport: what it asks for, what it undoes, and what it leaves when a datatype is missing.
+    CODED.update({"/c/gzip": (gz, "gzip"), "/c/zlib": (zlib.compress(TEXT), "deflate"),
+                  "/c/raw": (deflate_raw(TEXT), "deflate"), "/c/twice": (gzip.compress(zlib.compress(TEXT)), "deflate, gzip"),
+                  "/c/bad": (gz[:200] + bytes(64) + gz[264:], "gzip"), "/c/short": (gz[:len(gz) // 2], "gzip"),
+                  "/c/empty": (b"", "gzip"), "/c/odd": (b"plain", "compress"), "/c/gzbig": (GZBIG, "gzip")})
+    if BR:
+        CODED.update({"/c/br": (VEC["vec-html-q11"][0], "br"),
+                      "/c/brgz": (gzip.compress(VEC["vec-html-q11"][0]), "br, gzip")})
+    G = Fetcher(decoders=True, lib=DL)
+    accept = "gzip, deflate, br" if BR else "gzip, deflate"
+    assert f"accept-encoding: {accept}\n" in G.fetch(f"{base}/headers", flags=DECODE)[1].decode().lower()
+    assert f"accept-encoding: {accept}\n" in G.fetch(f"{h2base}/headers", flags=DECODE)[1].decode().lower()
+    for path, plain, name in [("/c/gzip", TEXT, "gzip.datatype"), ("/c/zlib", TEXT, "gzip.datatype"),
+                              ("/c/raw", TEXT, "gzip.datatype"), ("/c/twice", TEXT, "gzip.datatype, gzip.datatype"),
+                              ("/c/empty", b"", "gzip.datatype")] + \
+                             ([("/c/br", VEC["vec-html-q11"][1], "brotli.datatype"),
+                               ("/c/brgz", VEC["vec-html-q11"][1], "gzip.datatype, brotli.datatype")] if BR else []):
+        for u in (base, sbase):
+            hd, body, err = G.fetch(f"{u}{path}", flags=DECODE)
+            assert body == plain and err == 0 and hd["flags"] & H_DECODED and not hd["flags"] & H_LENGTH, (path, hd)
+            assert "content-encoding" not in hd["headers"] and "content-length" not in hd["headers"], hd
+            assert f"decode={name}\n" in hd["info"], (path, hd["info"])
+    hd, body, err = G.fetch(f"{base}/c/gzip", "HEAD", flags=DECODE)
+    assert hd["status"] == 200 and err == 0 and body == b"", hd
+    for path in ("/c/bad", "/c/short"):
+        hd, body, err = G.fetch(f"{base}{path}", flags=DECODE)
+        assert err == E_DECODE, (path, hd, err)
+    hd, body, err = G.fetch(f"{base}/c/odd", flags=DECODE)
+    assert body == b"plain" and hd["headers"]["content-encoding"] == ["compress"] and "decode=datatypes" in hd["info"], hd
+    hd, body, _ = G.fetch(f"{base}/c/gzip")
+    assert body == gz and "decode=" not in hd["info"], hd             # no WF_DECODE: as sent
+    S = Fetcher(window=16384, decoders=True, lib=DL)                   # 3 MB through a 16 KB window, HTTP/1.1 and HTTP/2
+    for u in (f"{base}/c/gzbig", f"{h2base}/gzbig"):
+        hs = [S.open(f"GET {u}\n", DECODE) for _ in range(3)]
+        for h in hs:
+            assert S.head(h)["flags"] & H_DECODED
+        for h in hs:
+            body, err = S.read_all(h, room=5000)
+            assert err == 0 and hashlib.md5(body).digest() == hashlib.md5(BIG).digest(), (u, len(body), err)
+            S.close(h)
+    S.free()
+    G.free()
+    # A datatype that is not installed: not asked for, and its bodies come as sent.
+    os.environ["WFNP_DT_MISSING"] = "brotli"
+    M = Fetcher(decoders=True, lib=DL)
+    assert "accept-encoding: gzip, deflate\n" in M.fetch(f"{base}/headers", flags=DECODE)[1].decode().lower()
+    if BR:
+        hd, body, _ = M.fetch(f"{base}/c/br", flags=DECODE)
+        assert body == VEC["vec-html-q11"][0] and hd["headers"]["content-encoding"] == ["br"], hd
+        assert "decode=datatypes" in hd["info"] and not hd["flags"] & H_DECODED, hd
+        hd, body, _ = M.fetch(f"{base}/c/brgz", flags=DECODE)
+        assert body == CODED["/c/brgz"][0] and hd["headers"]["content-encoding"] == ["br, gzip"], hd
+    assert M.fetch(f"{base}/c/gzip", flags=DECODE)[1] == TEXT
+    M.free()
+    os.environ["WFNP_DT_MISSING"] = "gzip brotli"
+    M = Fetcher(decoders=True, lib=DL)
+    assert "accept-encoding: identity\n" in M.fetch(f"{base}/headers", flags=DECODE)[1].decode().lower()
+    assert "accept-encoding: identity\n" in M.fetch(f"{h2base}/headers", flags=DECODE)[1].decode().lower()
+    hd, body, _ = M.fetch(f"{base}/c/gzip", flags=DECODE)
+    assert body == gz and hd["headers"]["content-encoding"] == ["gzip"] and "decode=datatypes" in hd["info"], hd
+    M.free()
+    os.environ.pop("WFNP_DT_MISSING")
+    assert DL.wfnp_dt_live() == 0, DL.wfnp_dt_live()
+    print(f"datatypes through the transport: Accept-Encoding: {accept} (identity with none installed, over HTTP/1.1 "
+          "and HTTP/2), bodies undone over HTTP and HTTPS with decode=<datatype>, two codings in a row, HEAD, an empty "
+          "body; damaged and cut short give error 8; an unknown coding or a missing datatype leaves the body as sent "
+          "(decode=datatypes); 3 MB through a 16 KB window over HTTP/1.1 and HTTP/2; every object disposed")
+else:
+    print(f"datatypes' glue: skipped, no opendatatypes checkout at {ODT} (set ODT)")
 
 # ---- an independent HTTP/2 server: Go's net/http, when Go is here ----------------------------------------
 

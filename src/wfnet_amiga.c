@@ -5,6 +5,11 @@
  * Every library base lives in a struct wfna, none in globals, so any
  * number of tasks can each have their own.
  *
+ * Compressed bodies are undone by the datatypes (src/wfnet_dec.c):
+ * datatypes.library is opened the first time a coded body or WFN_F_DECODE
+ * comes, and stream.datatype's gzip.datatype and brotli.datatype do the
+ * work. Without them the body comes as the server sent it.
+ *
  * Names are resolved with gethostbyname(), which blocks the task for as
  * long as the stack takes; everything after that is non-blocking.
  * WaitSelect() also waits on Ctrl-C and on the signals the caller names
@@ -31,15 +36,21 @@
 #include <proto/bsdsocket.h>
 #include <libraries/opentls.h>
 #include <proto/opentls.h>
+#include <datatypes/datatypes.h>
+#include <datatypes/datatypesclass.h>
+#include <proto/datatypes.h>
+#include <datatypes/streamclass.h>
 
 #include "openweb/wfnet.h"
 #include "wfnet_amiga.h"
+#include "wfnet_dec.h"
 
 /* The programs' own SysBase and DOSBase; the network's bases are ours. */
 extern struct ExecBase *SysBase;
 extern struct DosLibrary *DOSBase;
 #define SocketBase (e->socketbase)
 #define OpenTLSBase (e->tlsbase)
+#define DataTypesBase (e->dtbase)
 
 /* bsdsocket.library's error numbers (BSD's), whatever the C library calls its own. */
 #define B_EINTR       4
@@ -53,6 +64,9 @@ struct wfna {
     struct Library *socketbase;
     struct Library *tlsbase;
     struct OTContext *ctx;
+    struct Library *dtbase;     /* datatypes.library, once a body is to be decoded */
+    UBYTE dt_tried;             /* it was looked for */
+    UBYTE dt_seen;              /* which datatypes are there (wfn_dec_accept) */
     ULONG sigs;                 /* the caller's signals to wait on as well */
     ULONG got;                  /* which of them came */
     ULONG seed;
@@ -379,6 +393,87 @@ static long a_getenv(void *env, const char *name, char *out, unsigned long room)
     return n >= 0 ? n : -1;
 }
 
+/* ---- the datatypes, for src/wfnet_dec.c -------------------------------- */
+
+/* wfnet_dec.h's numbers are streamclass.h's. */
+typedef char wfn_dt_numbers[SDTF_END == WFN_DT_END && SDTF_HUNGRY == WFN_DT_HUNGRY && SDTF_ERROR == WFN_DT_ERROR
+                            && SDTW_AUTO == WFN_DTW_AUTO && SDTW_GZIP == WFN_DTW_GZIP ? 1 : -1];
+
+void *wfn_dt_alloc(void *env, unsigned long n)
+{
+    return a_alloc(env, n);
+}
+
+void wfn_dt_release(void *env, void *p)
+{
+    a_release(env, p);
+}
+
+void *wfn_dt_new(void *env, const char *name, unsigned long wrapper)
+{
+    struct wfna *e = env;
+    struct TagItem t[5];
+    if (!e->dtbase) {
+        if (e->dt_tried)
+            return NULL;
+        e->dt_tried = 1;
+        if (!(e->dtbase = OpenLibrary((CONST_STRPTR)"datatypes.library", 39)))
+            return NULL;
+    }
+    t[0].ti_Tag = DTA_SourceType, t[0].ti_Data = DTST_RAM;
+    t[1].ti_Tag = DTA_BaseName, t[1].ti_Data = (ULONG)name;
+    t[2].ti_Tag = DTA_GroupID, t[2].ti_Data = GID_DATA;
+    t[3].ti_Tag = SDTA_Wrapper, t[3].ti_Data = wrapper;
+    t[4].ti_Tag = TAG_DONE;
+    return NewDTObjectA(NULL, t);
+}
+
+int wfn_dt_feed(void *env, void *o, const unsigned char *p, unsigned long n)
+{
+    struct wfna *e = env;
+    struct sdtFeed m;
+    m.MethodID = SDTM_FEED;
+    m.sdtf_GInfo = NULL;
+    m.sdtf_Data = p;
+    m.sdtf_Length = n;
+    return DoDTMethodA(o, NULL, NULL, (Msg)&m) != 0;
+}
+
+unsigned long wfn_dt_take(void *env, void *o, unsigned char *p, unsigned long n, unsigned long *flags)
+{
+    struct wfna *e = env;
+    struct sdtTake m;
+    ULONG got;
+    m.MethodID = SDTM_TAKE;
+    m.sdtt_GInfo = NULL;
+    m.sdtt_Buffer = p;
+    m.sdtt_Length = n;
+    m.sdtt_Actual = m.sdtt_Flags = 0;
+    got = DoDTMethodA(o, NULL, NULL, (Msg)&m);
+    *flags = m.sdtt_Flags;                      /* SDTF_ are WFN_DT_ */
+    return got;
+}
+
+void wfn_dt_end(void *env, void *o)
+{
+    struct wfna *e = env;
+    struct sdtEnd m;
+    m.MethodID = SDTM_END;
+    m.sdte_GInfo = NULL;
+    DoDTMethodA(o, NULL, NULL, (Msg)&m);
+}
+
+void wfn_dt_dispose(void *env, void *o)
+{
+    struct wfna *e = env;
+    DisposeDTObject(o);
+}
+
+static const char *a_dec_accept(void *env)
+{
+    return wfn_dec_accept(env, &((struct wfna *)env)->dt_seen);
+}
+
 struct wfna *wfna_new(unsigned long window)
 {
     struct wfna *e = AllocVec(sizeof *e, MEMF_ANY | MEMF_CLEAR);
@@ -410,7 +505,11 @@ struct wfna *wfna_new(unsigned long window)
     io.tls_free = a_tls_free;
     io.random = a_random;
     io.getenv = a_getenv;
-    /* dec_new: stream.datatype's gzip and brotli classes go here when they are there. */
+    io.dec_new = wfn_dec_new;
+    io.dec_run = wfn_dec_run;
+    io.dec_free = wfn_dec_free;
+    io.dec_accept = a_dec_accept;
+    io.dec_name = wfn_dec_name;
     e->seed = a_now(e);
     if (!(e->w = wfn_new(&io, window))) {
         wfna_free(e);
@@ -428,6 +527,8 @@ void wfna_free(struct wfna *e)
         OT_FreeContext(e->ctx);
     if (e->tlsbase)
         CloseLibrary(e->tlsbase);
+    if (e->dtbase)
+        CloseLibrary(e->dtbase);
     CloseLibrary(e->socketbase);
     FreeVec(e);
 }

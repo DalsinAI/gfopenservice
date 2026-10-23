@@ -34,7 +34,7 @@ Programs ask by name and do not know where the work runs:
 | `host/cdxl.c`, `host/media_cdxl.py` | `media.cdxl/1`: any movie into CDXL for an ECS, AGA or RTG Amiga, as an option (docs/MEDIA_CDXL.md); `media_cdxl.py` does it from the Cradle's command line |
 | `src/tocdxl.c` | `ToCDXL`, the Amiga command for `media.cdxl/1` |
 | `src/webfetch.c`, `include/openweb/webfetch.h` | The Amiga's side of `openweb.fetch/1`, for any program to link (docs/OPENWEB_FETCH.md) |
-| `src/wfnet*.c`, `include/openweb/wfnet.h` | The native transport of `openweb.fetch`: HTTP/1.1, HTTP/2 (our own HPACK), WebSocket, proxies and HTTP auth over the Amiga's bsdsocket.library and opentls.library, when no card or Cradle offers it; portable C, tested on Linux through `host/wfnet_posix.c` |
+| `src/wfnet*.c`, `include/openweb/wfnet.h` | The native transport of `openweb.fetch`: HTTP/1.1, HTTP/2 (our own HPACK), WebSocket, proxies and HTTP auth over the Amiga's bsdsocket.library and opentls.library, when no card or Cradle offers it; gzip, deflate and Brotli bodies undone by the datatypes (`src/wfnet_dec.c`: stream.datatype's gzip.datatype and brotli.datatype through datatypes.library); portable C, tested on Linux through `host/wfnet_posix.c` |
 | `src/owfetch.c` | `OWFetch`: fetches a URL through `openweb.fetch/1`, prints the status and headers, writes the body |
 | `host/openweb_fetch.c` | `openweb.fetch/1` on the host: HTTP and HTTPS fetches with OpenSSL 3, zlib and Brotli, many at once, each with its own handle (docs/OPENWEB_FETCH.md) |
 | `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, FluidSynth, sidplayfp) and the services' result cache |
@@ -68,8 +68,12 @@ call goes to the least busy one, so a cluster of Cradles shares the work.
 ## Building
 
 `./build.sh`, with the os32-gcc16 compiler (`OS32_GCC16`), and `OWFetch`
-with the os32 stove's GCC 6.5 (`OS32`). Install `openservice.device` in
-`DEVS:`.
+with the os32 stove's GCC 6.5 (`OS32`), with the openamigatls and
+opendatatypes checkouts beside this one (`OPENTLS`, `ODT`) for their
+headers. Install `openservice.device` in `DEVS:`. The native transport
+undoes compressed bodies when stream.datatype, gzip.datatype and
+brotli.datatype are in `SYS:Classes/DataTypes` (and z.library in `LIBS:`
+for gzip); without them it asks for them uncoded.
 
 The host side needs, on the Cradle: OpenSSL 3 for `opentls.key/1`, OpenSSL
 3's TLS and zlib for `openweb.fetch/1`, with libbrotlidec for its Brotli
@@ -90,7 +94,8 @@ each service with files made by `avifenc`, `heif-enc`, `ffmpeg` and
 LibreOffice; `host/test_openweb_fetch.py` against HTTP and HTTPS servers it
 starts on 127.0.0.1, with a throwaway certificate it makes with `openssl`;
 `host/test_wfnet.py` the native transport against HTTP/1.1, HTTP/2,
-WebSocket and proxy servers it starts, and RFC 7541's examples.
+WebSocket and proxy servers it starts, and RFC 7541's examples, and its
+decoders over opendatatypes' stream core when that checkout is there.
 
 Measured on AmigaOS 3.2.3 (AmigaChrome, OpenSocket) against a Cradle on
 other x86 cores: 500 `echo/1` calls, all correct, 2.2 ms each.

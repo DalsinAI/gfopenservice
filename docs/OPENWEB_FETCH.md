@@ -139,8 +139,9 @@ own handshake.
 
 The native transport's info text starts with `transport=native`, and adds
 `alpn=h2` for HTTP/2, `proxy=host:port` through a proxy, `auth=server`,
-`auth=proxy` or `auth=both` when a challenge was answered, and
-`decode=datatypes` (below). Over HTTP/2 the status line is `HTTP/2 200`
+`auth=proxy` or `auth=both` when a challenge was answered, and with
+`WF_DECODE` the datatypes that undid the body (`decode=gzip.datatype`) or
+`decode=datatypes` when it was left coded (below). Over HTTP/2 the status line is `HTTP/2 200`
 and header names come as the server sent them, in lower case.
 
 On an error, `error=` says what went wrong, and for a certificate the
@@ -317,9 +318,8 @@ It prints the status line and the headers (the TLS summary too with
 `INFO`), and writes the body to `TO`, or to the console. `HEADER` takes
 one or more `"Name: value"` strings. `HEAD` asks for the head only, `FROM`
 sends a file as the body (POST unless `METHOD` says otherwise), `RAW` keeps
-the body as the server sent it (natively, with no decoder there yet, the
-body is asked for with `Accept-Encoding: identity` unless a `HEADER` names
-one), `QUIET` prints nothing but errors, and
+the body as the server sent it (otherwise it is decoded: natively by the
+datatypes, see "Compressed bodies"), `QUIET` prints nothing but errors, and
 `NATIVE` uses this Amiga's own TCP/IP and OpenTLS even with a card there
 (`INFO` says which is used). Ctrl-C cancels. It returns 0 for an answer below 400, 5 for 400 and above,
 10 when the fetch failed (DNS, TLS, ...), and 20 when it could not start.
@@ -338,7 +338,8 @@ is our own, written from the RFCs.
   WebSocket; `src/wfnet_h2.c`: HTTP/2 (RFC 9113); `src/wfnet_hpack.c`:
   HPACK (RFC 7541) with the static table, a dynamic table each way and the
   Huffman code; `src/wfnet_auth.c`: MD5, SHA-1, SHA-256, base64, the
-  WebSocket accept key and the Basic and Digest answers.
+  WebSocket accept key and the Basic and Digest answers; `src/wfnet_dec.c`:
+  compressed bodies through the datatypes.
 - Portable C99 with no writable globals and nothing of the C library but
   `<string.h>`: the machine is a table of calls, `struct wfn_io`
   (`include/openweb/wfnet.h`): connect, send, receive, close, wait, TLS
@@ -348,9 +349,9 @@ is our own, written from the RFCs.
   globals); `host/wfnet_posix.c` with POSIX sockets and OpenSSL, for the
   tests on Linux.
 - Integers only. 68k code (the 68040, GCC 16.2, `-Os`): the protocol code
-  about 34.7 KB (`wfnet.c` 18.9, `wfnet_h2.c` 6.0, `wfnet_auth.c` 5.6,
-  `wfnet_hpack.c` 4.2), the Amiga side 2.8 KB, `webfetch.c` 3.7 KB; no
-  data or bss.
+  about 36.0 KB (`wfnet.c` 19.0, `wfnet_h2.c` 6.0, `wfnet_auth.c` 5.6,
+  `wfnet_hpack.c` 4.2, `wfnet_dec.c` 1.2), the Amiga side 3.3 KB,
+  `webfetch.c` 3.7 KB; no data or bss.
 - Memory: each fetch has its window (64 KB) and about 2 KB; each
   connection about 18 KB, and OpenTLS's 33 KB with TLS. An HTTP/2 header
   block is decoded into 64 KB that is freed straight after.
@@ -438,17 +439,52 @@ challenge. A second 401 comes back as the answer.
 
 ### Compressed bodies
 
-The transport does not decode bodies itself: decoding is the datatypes'
-work (stream.datatype, with gzip.datatype and brotli.datatype). Without
-`WF_DECODE` the body comes as the server sent it, `Content-Encoding` kept.
-With `WF_DECODE`, the transport asks for `gzip, deflate, br` and hands the
-coded body to `struct wfn_io`'s decoder (`dec_new`, `dec_run`, `dec_free`),
-which is where the datatypes' stream classes plug in; the head then drops
-`Content-Encoding` and `Content-Length` and sets bit 2, as the card does.
-Until those are there, `dec_new` is empty on the Amiga: the body comes as
-the server sent it, `Content-Encoding` kept, bit 2 clear, and the info
-text says `decode=datatypes`, for the program to decode it through
-datatypes itself. The tests plug zlib in to check the hook.
+The transport has no compression code of its own: decoding is the
+datatypes' work, stream.datatype with gzip.datatype (`gzip`, and
+`deflate` zlib-wrapped or raw, told apart by its first two bytes) and
+brotli.datatype (`br`). Without `WF_DECODE` the body comes as the server
+sent it, `Content-Encoding` kept, and no `Accept-Encoding` is added.
+
+With `WF_DECODE`:
+
+- `Accept-Encoding` offers only what can be undone now: `gzip, deflate,
+  br` with both datatypes, `gzip, deflate` or `br` with one, and
+  `identity` with neither (or no datatypes.library). The first such fetch
+  looks for them, by making and disposing an object of each, once per
+  `wf_service`. The caller's own `Accept-Encoding` is dropped, as on the
+  card.
+- `src/wfnet_dec.c` reads `Content-Encoding` and makes a streaming object
+  of each coding's datatype (`NewDTObject()` with `DTST_RAM`,
+  `DTA_BaseName` `gzip` or `brotli`, `SDTA_Wrapper` `SDTW_GZIP` for gzip
+  and x-gzip, `SDTW_AUTO` for deflate). It feeds the body in with
+  `SDTM_FEED` as it comes, takes the plain bytes with `SDTM_TAKE`, and
+  sends `SDTM_END` when the body ends. Coded bytes are fed only when the
+  plain side wants more, so about one piece of the body waits in it.
+- Several codings (`Content-Encoding: br, gzip`) are chained: up to
+  three, the last applied undone first, an object each.
+- The head drops `Content-Encoding` and `Content-Length` and sets bit 2,
+  as the card does, and the info text names the datatypes that did it:
+  `decode=gzip.datatype`, or `decode=gzip.datatype, brotli.datatype`.
+- Damaged or cut-short data fails the fetch with error 8 (DECODE). A body
+  of no bytes (HEAD, 304) is no error.
+- A coding with no datatype for it (`compress`, `zstd`, more than three
+  codings, or a datatype that is not installed) leaves the body as the
+  server sent it: `Content-Encoding` kept, bit 2 clear, and the info text
+  says `decode=datatypes`, for the program to decode it some other way.
+
+datatypes.library is opened the first time it is wanted and kept until
+the `wf_service` closes; when it is missing it is not looked for again.
+`src/wfnet_dec.c` is portable C: the machine gives it `NewDTObject()`, the
+three methods and `DisposeDTObject()` (`src/wfnet_amiga.c`), and the host
+test gives it opendatatypes' own portable core instead (`host/wfnet_dt.c`,
+below). `host/wfnet_posix.c` alone plugs zlib into the hook.
+
+What an Amiga needs, an OpenBrowser build too: stream.datatype,
+gzip.datatype and brotli.datatype in `SYS:Classes/DataTypes`, and
+z.library (OpenZlib) in `LIBS:` for gzip.datatype. Without gzip.datatype
+or z.library, gzip and deflate are not asked for; without brotli.datatype,
+br is not. Whether OS 3.2's own datatypes.library takes stream.datatype's
+new group (`GID_DATA`) is still to be checked on the bench.
 
 ### TLS through OpenTLS
 
@@ -504,8 +540,6 @@ for (;;) {
   (OpenTLS has `OT_GetSession`); HTTPS proxies and SOCKS; IPv6 in the
   Amiga side (bsdsocket's `gethostbyname` is IPv4); the name resolved
   without blocking.
-- **The datatypes' decoders** in the native transport's hook, once
-  stream.datatype, gzip.datatype and brotli.datatype are there.
 - **SEND answered later** too, when the upload queue is full, as HEAD and
   READ are now.
 - **The LAN transport for real Amigas.** The device already carries the
@@ -584,8 +618,17 @@ by flag) and, when Go is there, against Go's net/http HTTP/2 server;
 WebSocket echo (ping and pong both ways, parts, large messages, close from
 either side, a wrong accept key); a proxy (absolute form, CONNECT for
 HTTPS, HTTP/2 and WebSocket, the environment and `no_proxy`, a 407 with
-Basic); Basic and Digest auth (MD5, SHA-256, a POST sent again). It
-passes with AddressSanitizer and UBSan too, with no leaks of its own.
+Basic); Basic and Digest auth (MD5, SHA-256, a POST sent again);
+compressed bodies through `src/wfnet_dec.c` over opendatatypes' portable
+stream core (`ODT`, the checkout, default beside this one; skipped
+without it): gzip, x-gzip, gzip members, zlib and raw deflate, Brotli
+(with RFC 7932's dictionary, `BROTLI_RFC`), two codings in a row, fed and
+taken a byte at a time, damaged and cut short, HEAD and empty bodies,
+`Accept-Encoding` with all, some and none of the datatypes, and 3 MB
+through a 16 KB window over HTTP/1.1 and HTTP/2, every object disposed;
+and the portable files built as C99 with `-Wall -Wextra -Werror -Os`,
+with no writable data. It passes with AddressSanitizer and UBSan too,
+with no leaks of its own.
 
 Measured on 12 October 2026 with `OWFetch` on a scratch copy of an OS 3.2.3
 instance (AC090, the card's runtime built with this service): 20 fetches of

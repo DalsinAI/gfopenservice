@@ -254,8 +254,10 @@ static int send_headers(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
     }
     if (!f->has_ua)
         FIELD("user-agent", 10, "OpenWeb-Fetch/2", 15);
-    if (f->flags & WFN_F_DECODE)
-        FIELD("accept-encoding", 15, "gzip, deflate, br", 17);
+    if (f->flags & WFN_F_DECODE) {
+        const char *ae = wfn_accept(w);
+        FIELD("accept-encoding", 15, ae, strlen(ae));
+    }
     if (f->auth)
         FIELD("authorization", 13, f->auth, strlen(f->auth));
     if ((f->flags & WFN_F_BODY) && f->body_length != WFN_LENGTH_UNKNOWN) {

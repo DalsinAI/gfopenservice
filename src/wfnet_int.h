@@ -129,6 +129,7 @@ unsigned long wfn_up_take(struct wfn *w, struct wfn_fetch *f, unsigned char *out
 int wfn_flush(struct wfn *w, struct wfn_conn *c);
 int wfn_up_done(const struct wfn_fetch *f);
 void wfn_info(struct wfn_fetch *f, const char *key, const char *value);
+const char *wfn_accept(struct wfn *w);
 
 /* src/wfnet_h2.c */
 int wfn_h2_start(struct wfn *w, struct wfn_conn *c);

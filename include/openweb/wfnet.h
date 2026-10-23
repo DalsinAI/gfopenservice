@@ -131,15 +131,21 @@ struct wfn_io {
      * length, or -1 when it is not set. */
     long (*getenv)(void *env, const char *name, char *out, unsigned long room);
     /* Content decoding for WFN_F_DECODE: stream.datatype's gzip and brotli
-     * classes plug in here. dec_new answers NULL for a coding it cannot
-     * undo; then, and when dec_new itself is NULL, the body comes as the
-     * server sent it, with Content-Encoding kept and "decode=datatypes" in
-     * the info text. dec_run takes in (setting *used) and writes out:
-     * bytes written, or < 0 when the data is bad. last: no more input. */
+     * classes plug in here (src/wfnet_dec.c). dec_new answers NULL for a
+     * coding it cannot undo; then, and when dec_new itself is NULL, the
+     * body comes as the server sent it, with Content-Encoding kept and
+     * "decode=datatypes" in the info text. dec_run takes in (setting
+     * *used) and writes out: bytes written, or < 0 when the data is bad.
+     * last: no more input. */
     void *(*dec_new)(void *env, const char *coding);
     long (*dec_run)(void *env, void *dec, const unsigned char *in, unsigned long length, unsigned long *used,
                     unsigned char *out, unsigned long room, int last);
     void (*dec_free)(void *env, void *dec);
+    /* Accept-Encoding with WFN_F_DECODE: the codings dec_new can undo now
+     * ("gzip, deflate, br"); NULL, or no dec_accept, sends "identity". */
+    const char *(*dec_accept)(void *env);
+    /* What undid a body, for the info text ("decode=gzip.datatype"). */
+    const char *(*dec_name)(void *env, void *dec);
 };
 
 struct wfn;
