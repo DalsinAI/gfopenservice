@@ -1499,8 +1499,24 @@ static int assign(struct wfn *w, struct wfn_fetch *f)
         if (pending || busy >= KEEP_PER_HOST)
             return 0;
     }
-    if (w->nconn >= WFN_MAX_CONNS)
-        return 0;
+    if (w->nconn >= WFN_MAX_CONNS) {
+        /* No socket left: the oldest kept one goes, if one is idle; else
+         * the fetch waits for a connection to end. */
+        struct wfn_conn *oldest = NULL;
+        struct wfn_fetch *g;
+        for (c = w->conns; c; c = c->next) {
+            if (c->state != C_READY || c->owner || wfn_h2_busy(c)
+                || (oldest && (long)(c->idle_at - oldest->idle_at) >= 0))
+                continue;
+            for (g = w->fetches; g && g->conn != c; g = g->next)
+                ;
+            if (!g)
+                oldest = c;
+        }
+        if (!oldest)
+            return 0;
+        conn_free(w, oldest);           /* closed now: no fetch is on it */
+    }
     if (!(c = zalloc(w, sizeof *c))) {
         wfn_fail(w, f, WFN_E_HOST, "no memory");
         return 1;

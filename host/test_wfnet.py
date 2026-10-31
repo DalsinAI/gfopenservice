@@ -1287,6 +1287,31 @@ for h2 in hs[1:] + [h]:
 assert F.stats()[0] == 0, F.stats()
 print("128 loads at once over HTTP/2 (more streams than the server allows at a time); the 129th refused until one closes")
 
+# More hosts than sockets (56; the Amiga's fd_set holds 64): 80 HTTP/1.1 servers on 127.0.0.2 to 127.0.0.81, a slow
+# answer from each at once. No more than 56 sockets are ever open; the rest wait, and the second wave reuses the
+# room of the first wave's kept connections.
+many = []
+for i in range(80):
+    s = Server((f"127.0.0.{i + 2}", 0), Handler)
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    many.append(s)
+hs = [F.open(f"GET http://127.0.0.{i + 2}:{many[i].server_address[1]}/slow\n") for i in range(80)]
+most, done, t = 0, {}, time.time()
+while len(done) < len(hs) and time.time() - t < 60:
+    for h in hs:
+        if h not in done:
+            st, n, end, out = F.call(READ, h, (0, 0, 0, 0), room=1000)
+            if end:
+                done[h] = end >> 8
+    most = max(most, F.stats()[1])
+    time.sleep(0.02)
+assert len(done) == 80 and all(e == 0 for e in done.values()) and most <= 56, (len(done), most)
+for h in hs:
+    F.close(h)
+for s in many:
+    s.shutdown()
+print(f"80 HTTP/1.1 hosts at once: every answer came, at most {most} sockets open (the cap is 56)")
+
 # Flow control: 3 MB on a stream with a 64 KB window, read slowly; several large ones at once.
 hd, body, err = F.fetch(f"{h2base}/big")
 assert body == BIG and err == 0
