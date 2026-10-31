@@ -1270,6 +1270,23 @@ for h in hs:
     F.close(h)
 print(f"HTTP/2 streams side by side: 12 answers of 0.4 s each in {took:.2f} s on one connection")
 
+# More loads at once than a page used to be allowed (64): 128 open side by side, the 129th is refused
+# with WFN_BUSY (-5), and once one is closed the next goes in.
+hs = [F.open(f"GET {h2base}/s{i}\n") for i in range(128)]
+st = F.call(OPEN, 0, (0, 0, 0, 0), (f"GET {h2base}/s128\n".encode(), None))[0]
+assert st == -5, st
+for i, h in enumerate(hs):
+    hd = F.head(h)
+    body, err = F.read_all(h)
+    assert hd["status"] == 200 and err == 0 and body.endswith(f"/s{i}".encode()), (i, hd["status"], body, err)
+F.close(hs[0])
+h = F.open(f"GET {h2base}/s128\n")
+assert F.read_all(h)[0].endswith(b"/s128")
+for h2 in hs[1:] + [h]:
+    F.close(h2)
+assert F.stats()[0] == 0, F.stats()
+print("128 loads at once over HTTP/2 (more streams than the server allows at a time); the 129th refused until one closes")
+
 # Flow control: 3 MB on a stream with a 64 KB window, read slowly; several large ones at once.
 hd, body, err = F.fetch(f"{h2base}/big")
 assert body == BIG and err == 0

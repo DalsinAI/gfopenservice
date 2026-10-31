@@ -1499,7 +1499,7 @@ static int assign(struct wfn *w, struct wfn_fetch *f)
         if (pending || busy >= KEEP_PER_HOST)
             return 0;
     }
-    if (w->nconn >= WFN_MAX_FETCHES + KEEP_MAX)
+    if (w->nconn >= WFN_MAX_CONNS)
         return 0;
     if (!(c = zalloc(w, sizeof *c))) {
         wfn_fail(w, f, WFN_E_HOST, "no memory");
@@ -1583,8 +1583,8 @@ static void progress(struct wfn *w)
 /* Waits at most ms for a socket to be ready: WFN_BROKEN when told to stop. */
 static int block(struct wfn *w, unsigned long ms)
 {
-    long socks[WFN_MAX_FETCHES + KEEP_MAX];
-    unsigned char want[WFN_MAX_FETCHES + KEEP_MAX], ready[WFN_MAX_FETCHES + KEEP_MAX];
+    long socks[WFN_MAX_CONNS];
+    unsigned char want[WFN_MAX_CONNS], ready[WFN_MAX_CONNS];
     struct wfn_conn *c;
     struct wfn_fetch *f;
     unsigned long t = now(w);

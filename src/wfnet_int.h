@@ -9,7 +9,8 @@
 
 typedef unsigned int wu32;      /* 32 bits on the 68k and on Linux */
 
-#define WFN_MAX_FETCHES 64
+#define WFN_MAX_FETCHES 128     /* a browser's page can have more than 64 loads under way */
+#define WFN_MAX_CONNS   96      /* sockets, as before the fetches went to 128 */
 #define WFN_MAX_HEAD    (64UL << 10)        /* a response head; the request text */
 #define WFN_FRAME       16384UL             /* HTTP/2's frame size, ours and the default */
 #define WFN_IN_ROOM     (WFN_FRAME + 9 + 1015)
