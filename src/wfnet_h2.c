@@ -468,7 +468,10 @@ static int handle(struct wfn *w, struct wfn_conn *c, unsigned type, unsigned fla
                 }
                 f->left -= dl;
             }
-            took = wfn_deliver(w, f, d, dl);
+            /* Behind bytes already stashed, a frame is stashed too: the body
+             * stays in order (the decoder fills the ring and stashes long
+             * before the window is used up). */
+            took = f->raw.len ? 0 : wfn_deliver(w, f, d, dl);
             if (f->body_done && f->error)
                 return 1;                           /* the decoder failed */
             if (f->dec || f->discard)

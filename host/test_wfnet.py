@@ -348,6 +348,9 @@ SEEN = {"ports": [], "proxy": [], "h2conns": 0, "h2streams": [], "ws_pong": []}
 TEXT = b"".join(b"Line %d of a page the Amiga asked for.\n" % i for i in range(3000))
 BIG = random.Random(7).randbytes(3 << 20)
 GZBIG = gzip.compress(BIG, 1)
+# A page-like body that gzip shrinks about tenfold, as HTML: the decoder fills the ring long before the window is used.
+PAGE = b"".join(b"<p class=\"item\">Item %d: %s</p>\n" % (i, random.Random(i).randbytes(6).hex().encode()) for i in range(60000))
+GZPAGE = gzip.compress(PAGE)
 CODED = {}                                             # path: (body, Content-Encoding), for the datatypes' tests
 DIGEST_NONCE = "dcd98b7102dd2f0e8b11d0f600bfb0c093"
 
@@ -672,6 +675,8 @@ class H2Conn:
             data = BIG
         elif path == "/gzbig":
             data = GZBIG
+        elif path == "/gzpage":
+            data = GZPAGE
         elif path == "/echo":
             data = f"{len(body)} {hashlib.md5(body).hexdigest()}".encode()
         elif path.startswith("/slow") or path.startswith("/s"):
@@ -682,7 +687,7 @@ class H2Conn:
         cl = len(data) + (5 if path == "/short" else -5 if path == "/long" else 0)
         fields = [(":status", status), ("server", "pyh2"), ("content-type", "text/plain"),
                   ("content-length", str(cl)), ("x-stream", str(sid)), ("set-cookie", "s=1"), ("set-cookie", "t=2")]
-        if path == "/gzbig":
+        if path in ("/gzbig", "/gzpage"):
             fields.append(("content-encoding", "gzip"))
         with self.lock:
             block = self.enc.encode(fields)          # encoded in the order sent, so the tables agree
@@ -697,7 +702,8 @@ class H2Conn:
                     self.cv.wait(5)
                 if self.closed or sid not in self.wins:
                     return
-                n = min(16384, self.conn_win, self.wins[sid], len(data) - at)
+                # /gzpage in small frames, as servers send pages: several arrive while the ring is full
+                n = min(1200 if path == "/gzpage" else 16384, self.conn_win, self.wins[sid], len(data) - at)
                 self.conn_win -= n
                 self.wins[sid] -= n
                 last = at + n >= len(data)
@@ -1593,7 +1599,8 @@ if os.path.isfile(os.path.join(DT, "stream", "sdtcore.c")):
     CODED.update({"/c/gzip": (gz, "gzip"), "/c/zlib": (zlib.compress(TEXT), "deflate"),
                   "/c/raw": (deflate_raw(TEXT), "deflate"), "/c/twice": (gzip.compress(zlib.compress(TEXT)), "deflate, gzip"),
                   "/c/bad": (gz[:200] + bytes(64) + gz[264:], "gzip"), "/c/short": (gz[:len(gz) // 2], "gzip"),
-                  "/c/empty": (b"", "gzip"), "/c/odd": (b"plain", "compress"), "/c/gzbig": (GZBIG, "gzip")})
+                  "/c/empty": (b"", "gzip"), "/c/odd": (b"plain", "compress"), "/c/gzbig": (GZBIG, "gzip"),
+                  "/c/gzpage": (GZPAGE, "gzip")})
     if BR:
         CODED.update({"/c/br": (VEC["vec-html-q11"][0], "br"),
                       "/c/brgz": (gzip.compress(VEC["vec-html-q11"][0]), "br, gzip")})
@@ -1629,6 +1636,22 @@ if os.path.isfile(os.path.join(DT, "stream", "sdtcore.c")):
             body, err = S.read_all(h, room=5000)
             assert err == 0 and hashlib.md5(body).digest() == hashlib.md5(BIG).digest(), (u, len(body), err)
             S.close(h)
+    # Read side by side, a little at a time, as a browser does: a frame that comes while bytes of the same
+    # stream wait in its stash goes behind them, so every body comes whole and in order.
+    for u in (f"{base}/c/gzpage", f"{h2base}/gzpage"):
+        hs = [S.open(f"GET {u}\n", DECODE) for _ in range(3)]
+        got, done, t = {h: b"" for h in hs}, {}, time.time()
+        while len(done) < len(hs) and time.time() - t < 60:
+            for h in hs:
+                if h not in done:
+                    st, n, end, out = S.call(READ, h, (0, 0, 0, 0), room=3000)
+                    got[h] += out
+                    if end:
+                        done[h] = end >> 8
+        assert all(done.get(h) == 0 and hashlib.md5(got[h]).digest() == hashlib.md5(PAGE).digest() for h in hs), \
+            (u, [(len(got[h]), done.get(h)) for h in hs])
+        for h in hs:
+            S.close(h)
     S.free()
     G.free()
     # A datatype that is not installed: not asked for, and its bodies come as sent.
@@ -1655,7 +1678,8 @@ if os.path.isfile(os.path.join(DT, "stream", "sdtcore.c")):
     print(f"datatypes through the transport: Accept-Encoding: {accept} (identity with none installed, over HTTP/1.1 "
           "and HTTP/2), bodies undone over HTTP and HTTPS with decode=<datatype>, two codings in a row, HEAD, an empty "
           "body; damaged and cut short give error 8; an unknown coding or a missing datatype leaves the body as sent "
-          "(decode=datatypes); 3 MB through a 16 KB window over HTTP/1.1 and HTTP/2; every object disposed")
+          "(decode=datatypes); 3 MB through a 16 KB window over HTTP/1.1 and HTTP/2, one after another; three "
+          "pages read side by side, a little at a time; every object disposed")
 else:
     print(f"datatypes' glue: skipped, no opendatatypes checkout at {ODT} (set ODT)")
 
