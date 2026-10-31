@@ -1617,10 +1617,25 @@ static int block(struct wfn *w, unsigned long ms)
     return w->io.wait(w->io.env, socks, want, ready, n, ms);
 }
 
-/* Runs until done(f) or the wait is over. */
+/* What the caller could take now, summed over the fetches: when progress()
+ * changes it, a caller is waiting for those bytes, not for a socket. */
+static unsigned long takeable(struct wfn *w)
+{
+    struct wfn_fetch *f;
+    unsigned long n = 0;
+    for (f = w->fetches; f; f = f->next)
+        n += f->ring.len + f->head_ready + f->body_done + (f->error ? 1 : 0);
+    return n;
+}
+
+/* Runs until done(f) or the wait is over. What is already there is taken
+ * without moving every other fetch on first: a task asking each of many
+ * fetches in turn (a browser) would otherwise move all of them on for each. */
 static void wait_for(struct wfn *w, struct wfn_fetch *f, unsigned long wait, int (*done)(const struct wfn_fetch *))
 {
     unsigned long start = now(w);
+    if (done(f))
+        return;
     if (wait > MAX_WAIT)
         wait = MAX_WAIT;
     for (;;) {
@@ -1663,8 +1678,12 @@ static int ws_room(const struct wfn_fetch *f)
  * moves them on again. For a task with many fetches: pump, then ask each with a wait of 0. */
 void wfn_pump(struct wfn *w, unsigned long ms)
 {
+    unsigned long before = takeable(w);
     progress(w);
-    if (ms) {
+    /* Bytes, heads or ends that came in this round are for the caller now:
+     * the sockets they came from are drained, so waiting on them would hold
+     * those bytes until the next packet (up to ms). */
+    if (ms && takeable(w) == before) {
         block(w, ms > MAX_WAIT ? MAX_WAIT : ms);
         progress(w);
     }
