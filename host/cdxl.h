@@ -1,7 +1,7 @@
 /*
  * media.cdxl/1: any movie FFmpeg reads, transcoded on the host to CDXL, the
  * Amiga's own streaming video format, for the machine that will play it
- * (docs/MEDIA_CDXL.md). MIT, Copyright (c) 2026 AmigaChrome Team.
+ * (docs/MEDIA_CDXL.md). MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef CDXL_H
 #define CDXL_H

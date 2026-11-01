@@ -1,6 +1,6 @@
 """Checks SVG in media_decode.c: its own size, the size asked, preserveAspectRatio,
 SVGZ, and the plain picture path's largest size. Needs librsvg-2.so.2 at run time.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import gzip
 import struct
 import time

@@ -4,7 +4,7 @@ HTTP/1.1 (kept connections, chunked, uploads, timeouts, cancel), an HTTP/2 serve
 here by hand (ALPN h2, HPACK both ways, streams side by side, flow control, RST_STREAM, GOAWAY), a
 WebSocket echo server, an HTTP proxy with CONNECT, and Basic and Digest auth. First the pieces with
 published examples: RFC 7541 Appendix C, RFC 1321, FIPS 180-4, RFC 4648, RFC 6455 and RFC 7616.
-MIT, Copyright (c) 2026 AmigaChrome Team.
+MIT, Copyright (c) 2026 AmiCradle Team.
 SPDX-License-Identifier: MIT"""
 import base64
 import ctypes

@@ -1,7 +1,7 @@
 /*
  * openservice: find Cradles in the nursery with one mDNS question for
  * _amicradle._tcp.local (see mdns.h).
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <string.h>
 #include <exec/types.h>

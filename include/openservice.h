@@ -1,15 +1,15 @@
 /*
  * openservice: hand work to a named service, on the service card or on a
  * Cradle in the nursery (the LAN), or do it here when neither is there.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef OPENSERVICE_H
 #define OPENSERVICE_H
 
-/* Boards with the services block (ACSV at their base): AmigaChrome Team boards of any
+/* Boards with the services block (ACSV at their base): AmiCradle Team boards of any
  * product. The wire is the project's design/SERVICES_CARD.md (v1); the
  * emulator side is AC090's. */
-#define OPENSERVICE_MANUFACTURER     0xDA15   /* AmigaChrome Team */
+#define OPENSERVICE_MANUFACTURER     0xDA15   /* AmiCradle Team */
 
 /* The CLASS register ($20): what kind of board it is. Only for showing;
  * each board's directory says what it offers. */

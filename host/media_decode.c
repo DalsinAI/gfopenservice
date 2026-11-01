@@ -4,7 +4,7 @@
  * through those tools (media_tool.c), answered as 32-bit ARGB scaled to fit;
  * with MD_AV, JPEG, PNG, GIF, WebP, JPEG XL, PSD, EXR... and sounds, videos,
  * MIDI and SID tunes through FFmpeg (media_av.c).
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include "media_decode.h"
 

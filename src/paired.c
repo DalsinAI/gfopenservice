@@ -1,7 +1,7 @@
 /*
  * The Cradles this Amiga has paired with, and its own identity
  * (openservice.h). Plain dos.library, so the device can use it too.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <string.h>
 #include <dos/dos.h>

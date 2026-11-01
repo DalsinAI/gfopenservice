@@ -5,7 +5,7 @@
  *
  * Usage: ServiceTest [NAME=<service>] [COUNT=<n>]
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <stdio.h>
 #include <string.h>

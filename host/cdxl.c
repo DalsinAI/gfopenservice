@@ -4,7 +4,7 @@
  * (median cut, ordered dither) or HAM-encoded, or 24-bit chunky for RTG,
  * with 8-bit sound cut to each frame. The result is kept in the cache and
  * handed out in pieces.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
 #include "cdxl.h"

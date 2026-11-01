@@ -3,7 +3,7 @@
  * and the Nursery command carry it themselves (oscrypto.h): SHA-256, HMAC
  * and HKDF (RFC 2104, 5869), ChaCha20-Poly1305 (RFC 8439) and X25519
  * (RFC 7748, after TweetNaCl, which is in the public domain).
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <string.h>
 

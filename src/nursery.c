@@ -1,7 +1,7 @@
 /*
  * Nursery: lists the services this Amiga can hand work to.
  *
- * First the boards with the services block (AmigaChrome Team $DA15, any product): the
+ * First the boards with the services block (AmiCradle Team $DA15, any product): the
  * services card, CPU cores, FPU or TPU boards, virtual ones on AmiCradle on
  * a PC or on our appliance, or real ones. Then any
  * Cradle on the LAN that offers services, found with one mDNS question for
@@ -17,7 +17,7 @@
  *         six-digit code, and once they match the link is sealed with the
  *         key they agreed (docs/PAIRING.md)
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <stdio.h>
 #include <stdlib.h>

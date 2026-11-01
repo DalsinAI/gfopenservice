@@ -2,7 +2,7 @@
  * media.decode/1: pictures for an Amiga's datatypes, decoded on the host
  * (docs/MEDIA_DECODE.md). One call per request; no state between calls.
  * The emulator's service host and the LAN Cradle both call this.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef MEDIA_DECODE_H
 #define MEDIA_DECODE_H

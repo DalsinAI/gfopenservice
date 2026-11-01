@@ -4,7 +4,7 @@ Run by OpenOffice's own Python (program/python, which has its uno module):
 
   python office_pdf.py SOFFICE PROFILE-URL SOURCE PDF [CSV-OPTIONS]
 
-Python 2.7 and 3. MIT, Copyright (c) 2026 AmigaChrome Team."""
+Python 2.7 and 3. MIT, Copyright (c) 2026 AmiCradle Team."""
 import os
 import subprocess
 import sys

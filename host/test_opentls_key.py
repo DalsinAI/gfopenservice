@@ -1,4 +1,4 @@
-"""Checks opentls_key.c against Python's cryptography. MIT, Copyright (c) 2026 AmigaChrome Team."""
+"""Checks opentls_key.c against Python's cryptography. MIT, Copyright (c) 2026 AmiCradle Team."""
 import hashlib
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, x25519, utils

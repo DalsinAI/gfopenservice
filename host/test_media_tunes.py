@@ -1,7 +1,7 @@
 """Checks media.decode/1's tunes: MIDI through FluidSynth, SID through
 sidplayfp and tracker modules through FFmpeg's libopenmpt, each answered
 as 16-bit PCM like any other sound. The files are made here, byte by byte.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import os
 import struct
 import tempfile
@@ -30,7 +30,7 @@ def sid():
                   0xa9, 0x11, 0x8d, 0x04, 0xd4,      # triangle, gate on
                   0x60))
     head = b"PSID" + struct.pack(">HHHHHHHI", 2, 0x7c, 0, 0x1000, 0x1003, 1, 1, 0)
-    head += b"GFOpenService test".ljust(32, b"\0") + b"AmigaChrome Team".ljust(32, b"\0") + b"2026".ljust(32, b"\0")
+    head += b"GFOpenService test".ljust(32, b"\0") + b"AmiCradle Team".ljust(32, b"\0") + b"2026".ljust(32, b"\0")
     head += struct.pack(">HBBH", 0, 0, 0, 0)
     return head + struct.pack("<H", 0x1000) + code
 

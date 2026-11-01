@@ -1,6 +1,6 @@
 /*
  * Running host tools for the services: LibreOffice, poppler, ImageMagick,
- * FluidSynth, sidplayfp. MIT, Copyright (c) 2026 AmigaChrome Team.
+ * FluidSynth, sidplayfp. MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef HOSTRUN_H
 #define HOSTRUN_H

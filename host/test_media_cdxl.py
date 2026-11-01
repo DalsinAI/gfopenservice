@@ -1,6 +1,6 @@
 """Checks media.cdxl/1 (cdxl.c): a three-second movie with a 440 Hz tone,
 turned into CDXL with each preset, read back by FFmpeg's own CDXL reader.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import json
 import os
 import struct

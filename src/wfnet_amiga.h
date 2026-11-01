@@ -2,7 +2,7 @@
  * wfnet on the Amiga (src/wfnet_amiga.c): the native transport of
  * openweb.fetch over bsdsocket.library and gfopentls.library, for
  * src/webfetch.c. wfna_new answers NULL when no TCP/IP stack is running.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #ifndef WFNET_AMIGA_H

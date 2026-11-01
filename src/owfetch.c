@@ -16,7 +16,7 @@
  * Ctrl-C cancels. Returns 0 for any HTTP answer below 400, 5 for 400 and
  * above, 10 when the fetch failed, 20 when it could not start.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <stdio.h>
 #include <string.h>

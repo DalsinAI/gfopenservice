@@ -7,7 +7,7 @@ only; shares UDP 5353 with avahi and browsers on the same machine.
 
   nursery_advertise.py --services opentls.key/1,media.decode/1
 
-MIT, Copyright (c) 2026 AmigaChrome Team.
+MIT, Copyright (c) 2026 AmiCradle Team.
 """
 import argparse
 import socket

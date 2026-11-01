@@ -2,7 +2,7 @@
  * and AmiSSL, with the key maths on the 68k, or with SERVICE sent to
  * opentls.key/1 through gfopenservice.device (a services board or a paired
  * Cradle). Each URL gets a fresh handle, so a full handshake.
- * MIT, Copyright (c) 2026 AmigaChrome Team. */
+ * MIT, Copyright (c) 2026 AmiCradle Team. */
 #include <stdio.h>
 #include <string.h>
 #include <curl/curl.h>

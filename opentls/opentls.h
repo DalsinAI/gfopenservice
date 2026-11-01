@@ -4,7 +4,7 @@
  * every TLS handshake (certificate and handshake signatures, the key
  * exchange) goes to the transport, normally gfopenservice.device's
  * opentls.key/1, and is done here when the transport cannot.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef OPENTLS_H
 #define OPENTLS_H

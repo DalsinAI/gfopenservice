@@ -2,7 +2,7 @@
  * doc.render/1 on the host (docs/DOC_RENDER.md): LibreOffice, or Apache
  * OpenOffice through office_pdf.py, turns the document into a PDF once (kept in a cache by the file's hash), then
  * poppler's pdfinfo, pdftoppm and pdftotext answer for its pages and text.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
 #include "doc_render.h"

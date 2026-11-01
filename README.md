@@ -11,7 +11,7 @@ Cradle-side services.
 `openweb.fetch/1` for HTTP and HTTPS.
 Programs ask by name and do not know where the work runs:
 
-- **On a board in this machine.** Every AmigaChrome Team AutoConfig board with the
+- **On a board in this machine.** Every AmiCradle Team AutoConfig board with the
   services block: the services card, CPU cores, FPU or TPU boards. On
   AmiCradle (on x86 cores, or the appliance) these are virtual and the work runs on
   the x86 or ARM64 cores.
@@ -102,8 +102,8 @@ other x86 cores: 500 `echo/1` calls, all correct, 2.2 ms each.
 
 ## Licence
 
-MIT, Copyright (c) 2026 AmigaChrome Team. See LICENSE.
+MIT, Copyright (c) 2026 AmiCradle Team. See LICENSE.
 
 ## Contributors
 
-Nursery is created and maintained by [SacredTrees](https://github.com/SacredTrees) with The AmigaChrome Team, copyright AmigaChrome Team. Everyone whose work it includes is credited in [`CONTRIBUTORS.md`](CONTRIBUTORS.md).
+Nursery is created and maintained by [SacredTrees](https://github.com/SacredTrees) with The AmiCradle Team, copyright AmiCradle Team. Everyone whose work it includes is credited in [`CONTRIBUTORS.md`](CONTRIBUTORS.md).

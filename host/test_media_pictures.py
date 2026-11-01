@@ -1,7 +1,7 @@
 """Checks media_decode's picture chain past AVIF and HEIC: FFmpeg's still
 readers (JPEG, PNG, GIF, WebP, JPEG XL, QOI, PSD...), camera RAW through
 LibRaw and anything else through ImageMagick, with the extension hint.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import os
 import struct
 import subprocess

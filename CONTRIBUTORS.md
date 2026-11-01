@@ -4,9 +4,9 @@
 
 - **SacredTrees** ([@SacredTrees](https://github.com/SacredTrees)): created Nursery, designs it and maintains it.
 
-## The AmigaChrome team
+## The AmiCradle team
 
-We are The AmigaChrome Team, who build Nursery alongside SacredTrees:
+We are The AmiCradle Team, who build Nursery alongside SacredTrees:
 
 - **Agnus**, our coordinator, who keeps every thread moving.
 - **Thufir**, **Kynes** and **Galen**, who started the work on SacredTrees's x86 cores.
@@ -15,7 +15,7 @@ We are The AmigaChrome Team, who build Nursery alongside SacredTrees:
 ## Copyright holder
 
 Nursery's own code, `gfopenservice.device`, the Cradle-side services and the documents are
-Copyright (c) 2026 AmigaChrome Team, released under the MIT licence (`LICENSE`).
+Copyright (c) 2026 AmiCradle Team, released under the MIT licence (`LICENSE`).
 
 ## Third-party work in this repository
 
