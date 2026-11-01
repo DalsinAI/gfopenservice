@@ -12,7 +12,7 @@
  * is the 16-byte completion, then for each buffer the service writes a u32
  * byte count and that many bytes.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <string.h>
 #include <exec/memory.h>
@@ -81,7 +81,7 @@ static struct Task *starter;         /* waiting for the worker to start or stop 
 
 #define REG_CLASS    0x20
 
-/* Every AmigaChrome Team board with the services block: the services card, CPU cores,
+/* Every AmiCradle Team board with the services block: the services card, CPU cores,
  * FPU or TPU boards. Each has its own rings and interrupt server; the
  * directory on each says what it offers. */
 #define MAX_BOARDS 4

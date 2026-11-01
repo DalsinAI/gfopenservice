@@ -15,7 +15,7 @@ media.cdxl/1 (host/cdxl.c) when it is built with FFmpeg, and doc.render/1
 
   nursery_host.py --fingerprint <fp>
 
-MIT, Copyright (c) 2026 AmigaChrome Team.
+MIT, Copyright (c) 2026 AmiCradle Team.
 """
 import argparse
 import socket

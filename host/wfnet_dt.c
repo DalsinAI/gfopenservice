@@ -7,7 +7,7 @@
  * class's SDTM_FEED, SDTM_TAKE and SDTM_END, as streamclass.c answers them.
  * WFNP_DT_MISSING ("brotli", "gzip brotli") names datatypes to act as
  * if not installed.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #include <stdlib.h>

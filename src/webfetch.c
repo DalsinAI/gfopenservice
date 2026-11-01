@@ -3,7 +3,7 @@
  * native transport (src/wfnet_amiga.c) when no card or Cradle offers it
  * (include/openweb/webfetch.h). No C library beyond <string.h>, so any
  * program can link it.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <string.h>
 #include <exec/types.h>

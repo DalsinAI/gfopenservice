@@ -8,7 +8,7 @@
  * decoders are the Amiga's own instead (src/wfnet_dec.c), over
  * stream.datatype's portable core (host/wfnet_dt.c), as host/test_wfnet.py
  * builds it when opendatatypes is there.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #define _GNU_SOURCE

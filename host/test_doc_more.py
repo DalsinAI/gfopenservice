@@ -1,7 +1,7 @@
 """Checks doc.render/1's formats past office documents: PostScript and EPS
 through Ghostscript, EPUB and Markdown through pandoc, CSV, HTML and text
 through LibreOffice, the text ones named by the extension hint.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import os
 import struct
 import subprocess

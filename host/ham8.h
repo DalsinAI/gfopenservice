@@ -2,7 +2,7 @@
  * HAM8 for media.decode/1's VFRAME (docs/MEDIA_DECODE.md): a 24-bit picture
  * as AGA hold-and-modify pixels, for an AGA screen to show in eight
  * bitplanes with about 262,000 shades.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef HAM8_H
 #define HAM8_H

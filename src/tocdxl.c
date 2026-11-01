@@ -10,7 +10,7 @@
  *   default on AGA), AGAHAM (HAM8) or RTG (24-bit chunky, 640 x 360).
  *   SIZE: the largest picture, e.g. 320x256. The rest override the preset.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <stdio.h>
 #include <string.h>

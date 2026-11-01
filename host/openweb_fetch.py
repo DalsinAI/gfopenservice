@@ -1,5 +1,5 @@
 """ctypes binding for libopenwebfetch.so (openweb_fetch.h), for the LAN Cradle and the tests.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import ctypes
 import os
 import threading

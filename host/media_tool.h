@@ -3,7 +3,7 @@
  * through LibRaw's dcraw_emu, the raster formats ImageMagick reads (XCF,
  * TGA, PCX, ...; md_magick_coder), MIDI through FluidSynth and SID tunes
  * through sidplayfp.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef MEDIA_TOOL_H
 #define MEDIA_TOOL_H

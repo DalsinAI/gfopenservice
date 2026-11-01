@@ -1,6 +1,6 @@
 """Checks doc_render.c with documents LibreOffice itself writes: a two-page
 text as DOCX, ODT, RTF and DOC, and a table as XLSX.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import os
 import struct
 import subprocess

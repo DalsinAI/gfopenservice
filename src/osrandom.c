@@ -4,7 +4,7 @@
  * with SHA-256 into a pool that every call feeds. With slow set it also
  * waits a frame at a time 64 times and takes the E clock's jitter, for keys
  * that must stay secret; session nonces only need to differ.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <string.h>
 #include <exec/execbase.h>

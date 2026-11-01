@@ -1,6 +1,6 @@
 /*
  * media.decode/1, the half that runs host tools (media_tool.h).
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
 #include "media_tool.h"

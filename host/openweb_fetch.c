@@ -33,7 +33,7 @@
  * A fetch's descriptor is set to -1 under its mutex before its connection
  * is kept, so a late CANCEL never reaches the next fetch on it.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
 #include "openweb_fetch.h"

@@ -2,7 +2,7 @@
  * opentls.key/1: TLS public-key work for an Amiga, on the host
  * (docs/OPENTLS_KEY.md). One call per request; no state between calls.
  * The emulator's service host and the LAN Cradle both call this.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef OPENTLS_KEY_H
 #define OPENTLS_KEY_H

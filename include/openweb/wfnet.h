@@ -16,7 +16,7 @@
  * most its wait, so one task can have many fetches in flight on one
  * struct wfn. A struct wfn belongs to one task.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #ifndef OPENWEB_WFNET_H

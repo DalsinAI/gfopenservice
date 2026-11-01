@@ -3,7 +3,7 @@
 # os32-gcc16 compiler (GCC 16.2, libnix), OWFetch with the os32 stove (GCC 6.5),
 # and the host side's libraries: TLS keys, media decoding, documents and web fetches.
 #   OS32_GCC16  compiler root holding prefix/ (default ~/AmiCradle/stoves/os32-gcc16)
-# MIT, Copyright (c) 2026 AmigaChrome Team.
+# MIT, Copyright (c) 2026 AmiCradle Team.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 P=${OS32_GCC16:-"$HOME/AmiCradle/stoves/os32-gcc16"}/prefix

@@ -2,7 +2,7 @@
 frames against ffmpeg's own pictures, VSOUND's sound against the tone that
 was put in, a video sent in parts with VUPLOAD, and VOPENURL over HTTP for
 a plain file and an HLS playlist.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import functools
 import http.server
 import math

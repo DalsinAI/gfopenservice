@@ -1,7 +1,7 @@
 /*
  * wfnet's own parts, shared by src/wfnet.c (fetches, connections,
  * HTTP/1.1, proxies, auth, WebSocket) and src/wfnet_h2.c (HTTP/2).
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #ifndef WFNET_INT_H

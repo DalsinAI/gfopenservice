@@ -1,5 +1,5 @@
 """ctypes binding for libopentlskey.so (opentls_key.h), for the LAN Cradle.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import ctypes
 import os
 

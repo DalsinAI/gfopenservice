@@ -4,7 +4,7 @@
  * opentls.key/1, the key maths of every TLS handshake goes there. It returns
  * where (OSWHERE_CARD or OSWHERE_LAN), or 0 when nothing offers it and
  * AmiSSL keeps doing everything itself.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef OPENTLS_AMIGA_H
 #define OPENTLS_AMIGA_H

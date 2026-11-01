@@ -4,7 +4,7 @@
  * WebSocket accept key (RFC 6455) and the answers to HTTP Basic (RFC 7617)
  * and Digest (RFC 7616, MD5 and SHA-256, with or without -sess)
  * challenges. Small and plain: a few hashes per request, never bulk data.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #include <string.h>

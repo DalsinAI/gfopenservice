@@ -2,7 +2,7 @@
  * HAM8 for media.decode/1's VFRAME: base colours by median cut (or the
  * fixed 4x4x4 cube) and, pixel by pixel, the nearer of a base colour and
  * the pixel to the left with one channel changed.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include "ham8.h"
 

@@ -2,7 +2,7 @@
  * doc.render/1: office documents for an Amiga's datatypes, laid out by
  * LibreOffice on the host and sent back as pictures of their pages
  * (docs/DOC_RENDER.md). The emulator's service host and the LAN Cradle
- * both call this. MIT, Copyright (c) 2026 AmigaChrome Team.
+ * both call this. MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef DOC_RENDER_H
 #define DOC_RENDER_H

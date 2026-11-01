@@ -1,6 +1,6 @@
 /*
  * The Nursery LAN link's cryptography (oscrypto.c).
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef OSCRYPTO_H
 #define OSCRYPTO_H

@@ -3,7 +3,7 @@
  * size the Amiga wants, so an icon costs milliseconds rather than a browser
  * engine's seconds. librsvg is opened with dlopen when first needed: no
  * headers or new packages to build, and a host without it falls back to the
- * rest of the picture chain. MIT, Copyright (c) 2026 AmigaChrome Team.
+ * rest of the picture chain. MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <dlfcn.h>
 #include <math.h>

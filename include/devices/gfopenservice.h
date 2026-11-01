@@ -22,7 +22,7 @@
  * Requests run at the same time; each completes on its own. The fields
  * mirror one entry of the services card (design/SERVICES_CARD.md, v1).
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef DEVICES_OPENSERVICE_H
 #define DEVICES_OPENSERVICE_H

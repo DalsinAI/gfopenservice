@@ -3,7 +3,7 @@ the file (an IFD at 0xFFFFFFFE, a central directory or local header at
 0xFFFFFFF0), which once wrapped the bounds checks and read 4 GB past the
 buffer inside the emulator. Builds media_tool.c with AddressSanitizer into a
 small driver, so it needs gcc with libasan and zlib's headers, not libavif.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import glob
 import os
 import shutil

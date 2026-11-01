@@ -4,7 +4,7 @@
  * answered as 16-bit big-endian PCM at the rate and channels asked for, and
  * any video (H.264, HEVC, AV1, VP9, MPEG-4, WMV...) kept open and answered
  * frame by frame in 256 colours or 24-bit, scaled to fit.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include "media_decode.h"
 #include "media_av.h"

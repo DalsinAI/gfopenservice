@@ -11,7 +11,7 @@
  * its value and then their two lengths, so the newest is found from the
  * end. Evicting moves what is left down (at most the table's size).
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #include <string.h>

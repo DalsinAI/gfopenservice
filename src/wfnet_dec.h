@@ -9,7 +9,7 @@
  * datatypes.library, host/wfnet_dt.c with stream.datatype's portable core
  * for the tests. env is struct wfn_io's.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #ifndef WFNET_DEC_H

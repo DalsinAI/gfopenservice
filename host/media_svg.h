@@ -1,7 +1,7 @@
 /*
  * media.decode/1, SVG: drawn on the host by librsvg and cairo, loaded when
  * first needed, so a host without them still offers everything else.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef MEDIA_SVG_H
 #define MEDIA_SVG_H

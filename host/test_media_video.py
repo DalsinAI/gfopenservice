@@ -1,7 +1,7 @@
 """Checks media_av.c's video against ffmpeg's own decoding: a grey ramp,
 one shade a frame, in several containers and codecs. Frames asked for in
 order, backwards and at random must be the right ones.
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import os
 import random
 import struct

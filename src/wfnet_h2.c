@@ -13,7 +13,7 @@
  * take to a new connection, when they can be sent again; RST_STREAM ends
  * one stream, or (REFUSED_STREAM) sends it again.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #include <string.h>

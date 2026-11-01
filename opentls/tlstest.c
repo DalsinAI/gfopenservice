@@ -2,7 +2,7 @@
  * tlstest HOST...: a TLS handshake with each host through the obkey
  * provider, the service played by host/opentls_key.c in this process.
  * Checks the certificate chain and host name as a browser does.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include <stdio.h>
 #include <stdlib.h>

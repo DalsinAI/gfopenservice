@@ -19,7 +19,7 @@
  * WaitSelect() also waits on Ctrl-C and on the signals the caller names
  * (wfna_wait), so a program's own event loop can sit on it.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #define __NOLIBBASE__

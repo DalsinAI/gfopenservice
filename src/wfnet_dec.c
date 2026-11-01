@@ -8,7 +8,7 @@
  * when the plain side asks for more, so what waits in the objects stays
  * about one piece of the body.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #include "wfnet_dec.h"

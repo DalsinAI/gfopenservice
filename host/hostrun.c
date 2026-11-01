@@ -1,6 +1,6 @@
 /*
  * Running host tools for the services (hostrun.h).
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
 #include "hostrun.h"

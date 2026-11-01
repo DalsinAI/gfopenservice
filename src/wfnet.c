@@ -12,7 +12,7 @@
  * HTTP/1.1 here; HTTP/2 in wfnet_h2.c, HPACK in wfnet_hpack.c, the hashes
  * and auth answers in wfnet_auth.c.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  * SPDX-License-Identifier: MIT
  */
 #include <string.h>

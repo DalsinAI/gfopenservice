@@ -5,7 +5,7 @@ docs/MEDIA_CDXL.md), the same code an Amiga calls through gfopenservice.device.
 usage: media_cdxl.py MOVIE OUT.cdxl [--preset ecs|ecs-ham|aga|aga-ham|rtg]
            [--size WxH] [--fps N] [--planes N] [--rate HZ] [--stereo] [--no-sound]
 
-MIT, Copyright (c) 2026 AmigaChrome Team."""
+MIT, Copyright (c) 2026 AmiCradle Team."""
 import argparse
 import struct
 import sys

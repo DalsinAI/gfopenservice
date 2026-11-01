@@ -1,5 +1,5 @@
 """Checks media_av.c's sounds against files made by ffmpeg: a 1 kHz tone,
-44.1 kHz stereo, two seconds. MIT, Copyright (c) 2026 AmigaChrome Team."""
+44.1 kHz stereo, two seconds. MIT, Copyright (c) 2026 AmiCradle Team."""
 import math
 import os
 import struct

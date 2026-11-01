@@ -1,6 +1,6 @@
 /*
  * media.decode/1, the FFmpeg half (media_av.c): sound and video.
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef MEDIA_AV_H
 #define MEDIA_AV_H

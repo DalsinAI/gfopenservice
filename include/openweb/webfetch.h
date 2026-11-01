@@ -24,7 +24,7 @@
  * each is a SendIO() answered later (the card holds it, wf_start); on the
  * native transport wf_wait() moves every fetch on.
  *
- * MIT, Copyright (c) 2026 AmigaChrome Team.
+ * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef OPENWEB_WEBFETCH_H
 #define OPENWEB_WEBFETCH_H
