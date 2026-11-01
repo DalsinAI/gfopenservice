@@ -440,6 +440,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply(200, CODED[p][0], [("Content-Encoding", CODED[p][1])])
         elif p == "/redirect":
             self.reply(302, b"", [("Location", "/hello")])
+        elif p.startswith("/bighead/"):             # /bighead/N[/early]: about N bytes of header lines
+            n = int(p.split("/")[2])
+            if p.endswith("/early"):                # a 103 of the same size first
+                self.wfile.write(b"HTTP/1.1 103 Early Hints\r\n" + b"".join(
+                    b"Link: </x%d>\r\n" % i for i in range(n // 12)) + b"\r\n")
+            pad = [("X-Pad-%d" % i, "p" * 90) for i in range(n // 104)]   # each line 100 to 104 bytes
+            self.reply(200, b"big head\n", pad + [("X-Last", "end")])
         elif p == "/slow":
             time.sleep(2.5)
             self.reply(200, b"slow\n")
@@ -1071,6 +1078,16 @@ assert hd["status"] == 404 and body == b"no such page\n"
 hd, body, _ = F.fetch(f"{base}/hello", method="HEAD")
 assert hd["status"] == 200 and hd["flags"] & H_NOBODY and body == b"", hd
 print("HTTP/1.1: status, headers (Set-Cookie kept, ours written), 302 left to the caller, 404, HEAD")
+
+# Response heads of every size up to 64 KB (the head's buffer grows as they come), a large 103 first,
+# and one over 64 KB refused.
+for n, early in ((200, ""), (2100, ""), (5000, ""), (40000, ""), (64000, ""), (5000, "/early")):
+    hd, body, err = F.fetch(f"{base}/bighead/{n}{early}")
+    assert hd["status"] == 200 and body == b"big head\n" and err == 0 and hd["headers"]["x-last"] == ["end"], (n, early, hd["error"])
+    assert len(hd["headers"].get("x-pad-%d" % (n // 104 - 1), [])) == 1, n
+hd, body, err = F.fetch(f"{base}/bighead/70000")
+assert hd["error"] == E_PROTOCOL and "64 KB" in hd["info"], hd
+print("HTTP/1.1 heads of 200 B to 64000 B read whole (and after a 5 KB 103); one over 64 KB refused")
 
 # Kept connections: one connection for many fetches, one after another.
 SEEN["ports"].clear()

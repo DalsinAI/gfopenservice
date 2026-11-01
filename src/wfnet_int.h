@@ -84,7 +84,7 @@ struct wfn_fetch {
     unsigned long up_cur_at, up_queued, up_given, up_sent, body_length;
     /* the head */
     char *hbuf;                         /* HTTP/1.1: the head as it comes */
-    unsigned long hbuf_len;
+    unsigned long hbuf_len, hbuf_room;  /* room grows to WFN_MAX_HEAD as needed */
     unsigned long status, hflags, version, length, error;
     char *htext;
     unsigned long hlen;
