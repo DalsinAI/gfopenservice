@@ -174,6 +174,7 @@ struct pending {
     ULONG id;
     UBYTE kind, where, conn, cancelSent;
     UBYTE handle;                    /* KIND_JOIN: the handle it joins */
+    ULONG sentAt;                    /* LAN: seconds (nowSeconds) when it went out */
 };
 static struct pending pending[MAX_PENDING];
 static ULONG nextId = 1;
@@ -201,8 +202,18 @@ struct conn {
     ULONG txCount, rxCount;
     UBYTE *record;
     ULONG recordLength, recordAt;
+    ULONG recordSize, recordFill;    /* the record coming in: its size (0: its length word first), bytes in */
+    UBYTE recordHead[4];
+    /* The answer being read, kept from one read to the next: the worker
+     * takes what has come and goes back to its loop (lanReceive). */
+    UBYTE stage, piece;              /* ANS_*; the buffer being read */
+    ULONG head[4];                   /* the completion */
+    ULONG word;                      /* that buffer's length word */
+    ULONG at;                        /* bytes of the current piece in so far */
+    ULONG heardAt;                   /* seconds: bytes last came from the Cradle (or it connected) */
 };
 static struct conn conns[MAX_CONNS];
+enum { ANS_HEAD, ANS_NEXT, ANS_LENGTH, ANS_DATA, ANS_DROP };
 
 static struct mdns_cradle cradles[8];
 static int cradleCount;
@@ -341,11 +352,41 @@ static void cardDrain(void)
 
 /* ---- the LAN path ------------------------------------------------------------ */
 
+/* The sockets to Cradles are non-blocking, so no Cradle can hold the worker
+ * for ever. A request with no answer, and no bytes from its Cradle, for
+ * LAN_DEADLINE seconds loses its connection (lanDeadlines); a send or a
+ * handshake that cannot go on for that long fails. */
+#define LAN_DEADLINE 60
+#define LAN_HANDSHAKE 10
+#define B_EWOULDBLOCK 35
+
+/* Seconds by dos.library's clock. */
+static ULONG nowSeconds(void)
+{
+    struct DateStamp ds;
+    DateStamp(&ds);
+    return (ULONG)ds.ds_Days * 86400 + ds.ds_Minute * 60 + ds.ds_Tick / TICKS_PER_SECOND;
+}
+
+/* Waits up to seconds for s to take more (write) or to have more. */
+static int waitFor(LONG s, int write, LONG seconds)
+{
+    fd_set set;
+    struct timeval wait;
+    FD_ZERO(&set);
+    FD_SET(s, &set);
+    wait.tv_sec = seconds;
+    wait.tv_usec = 0;
+    return WaitSelect(s + 1, write ? NULL : &set, write ? &set : NULL, NULL, &wait, NULL) > 0;
+}
+
 static int sendAll(LONG s, const void *data, ULONG length)
 {
     const UBYTE *p = data;
     while (length) {
         LONG n = send(s, (APTR)p, length, 0);
+        if (n < 0 && Errno() == B_EWOULDBLOCK && waitFor(s, 1, LAN_DEADLINE))
+            continue;
         if (n <= 0)
             return 0;
         p += n;
@@ -354,17 +395,30 @@ static int sendAll(LONG s, const void *data, ULONG length)
     return 1;
 }
 
+/* The session handshake's reads: each part within LAN_HANDSHAKE seconds. */
 static int recvAll(LONG s, void *data, ULONG length)
 {
     UBYTE *p = data;
     while (length) {
         LONG n = recv(s, p, length, 0);
+        if (n < 0 && Errno() == B_EWOULDBLOCK && waitFor(s, 0, LAN_HANDSHAKE))
+            continue;
         if (n <= 0)
             return 0;
         p += n;
         length -= n;
     }
     return 1;
+}
+
+/* What has come on s, up to n bytes, without waiting: 0 when nothing has,
+ * -1 when the Cradle closed or the socket failed. */
+static LONG recvSome(LONG s, void *data, ULONG n)
+{
+    LONG got = recv(s, data, n, 0);
+    if (got > 0)
+        return got;
+    return got < 0 && Errno() == B_EWOULDBLOCK ? 0 : -1;
 }
 
 #define MAX_RECORD (16UL << 20)
@@ -378,42 +432,67 @@ static void nonceFor(UBYTE nonce[12], ULONG count)
     nonce[11] = (UBYTE)count;
 }
 
-/* Reads from connection c: straight off the socket, or out of its sealed
- * records, opening the next one as needed. */
-static int connRead(int c, void *data, ULONG length)
+/* Up to n bytes of connection c's stream, of what has come, without
+ * waiting: straight off the socket, or out of its sealed records, opening
+ * each as its last byte comes. 0: nothing yet; -1: the connection is gone,
+ * or a record is not from the paired Cradle. */
+static LONG connTake(int c, UBYTE *data, ULONG n)
 {
     struct conn *k = &conns[c];
-    UBYTE *out = data;
+    LONG got;
     if (!k->sealed)
-        return recvAll(k->socket, data, length);
-    while (length) {
-        ULONG n;
-        if (k->recordAt == k->recordLength) {
-            UBYTE head[4], nonce[12];
-            ULONG size;
-            if (!recvAll(k->socket, head, 4))
+        return recvSome(k->socket, data, n);
+    while (k->recordAt == k->recordLength) {
+        UBYTE nonce[12];
+        if (!k->recordSize) {                         /* the record's length word */
+            got = recvSome(k->socket, k->recordHead + k->recordFill, 4 - k->recordFill);
+            if (got <= 0)
+                return got;
+            k->recordFill += got;
+            if (k->recordFill < 4)
                 return 0;
-            size = (ULONG)head[0] << 24 | (ULONG)head[1] << 16 | (ULONG)head[2] << 8 | head[3];
-            if (size < 16 || size > MAX_RECORD)
-                return 0;
+            k->recordSize = (ULONG)k->recordHead[0] << 24 | (ULONG)k->recordHead[1] << 16
+                          | (ULONG)k->recordHead[2] << 8 | k->recordHead[3];
+            if (k->recordSize < 16 || k->recordSize > MAX_RECORD)
+                return -1;
             if (k->record)
                 FreeVec(k->record);
-            k->record = AllocVec(size, MEMF_ANY);
-            k->recordLength = k->recordAt = 0;
-            if (!k->record || !recvAll(k->socket, k->record, size))
-                return 0;
-            nonceFor(nonce, k->rxCount++);
-            if (!os_aead_open(k->rxKey, nonce, head, 4, k->record, size - 16, k->record + size - 16))
-                return 0;                     /* not from the paired Cradle */
-            k->recordLength = size - 16;
+            k->record = AllocVec(k->recordSize, MEMF_ANY);
+            k->recordLength = k->recordAt = k->recordFill = 0;
+            if (!k->record)
+                return -1;
         }
-        n = k->recordLength - k->recordAt;
-        if (n > length)
-            n = length;
-        memcpy(out, k->record + k->recordAt, n);
-        k->recordAt += n;
-        out += n;
-        length -= n;
+        got = recvSome(k->socket, k->record + k->recordFill, k->recordSize - k->recordFill);
+        if (got <= 0)
+            return got;
+        k->recordFill += got;
+        if (k->recordFill < k->recordSize)
+            return 0;
+        nonceFor(nonce, k->rxCount++);
+        if (!os_aead_open(k->rxKey, nonce, k->recordHead, 4, k->record, k->recordSize - 16,
+                          k->record + k->recordSize - 16))
+            return -1;                        /* not from the paired Cradle */
+        k->recordLength = k->recordSize - 16;
+        k->recordSize = k->recordFill = 0;
+    }
+    got = k->recordLength - k->recordAt;
+    if ((ULONG)got > n)
+        got = n;
+    memcpy(data, k->record + k->recordAt, got);
+    k->recordAt += got;
+    return got;
+}
+
+/* The current piece of c's answer (want bytes, k->at of them in so far),
+ * from what has come: 1 when it is whole, 0 when more is to come, -1 lost. */
+static int connPiece(int c, void *data, ULONG want)
+{
+    struct conn *k = &conns[c];
+    while (k->at < want) {
+        LONG got = connTake(c, (UBYTE *)data + k->at, want - k->at);
+        if (got <= 0)
+            return (int)got;
+        k->at += got;
     }
     return 1;
 }
@@ -488,6 +567,7 @@ static int lanSubmit(struct pending *p, int c, UWORD service, UWORD op, const st
     putEntry(e, p->id, service, op, io);
     if (!io)
         ((ULONG *)e)[3] = arg;
+    p->sentAt = nowSeconds();
     pieces[0] = e;
     lengths[0] = sizeof e;
     for (i = 0; io && i < 4; i++)
@@ -498,51 +578,81 @@ static int lanSubmit(struct pending *p, int c, UWORD service, UWORD op, const st
     return connWrite(c, pieces, lengths, count);
 }
 
-/* One answer from connection c: the completion, then the written buffers. */
+/* Answers from connection c, each the completion, then the written
+ * buffers, read as far as their bytes have come: the rest waits for the
+ * next time the socket is ready, so a Cradle that stops half way through
+ * holds no one but its own requests (and lanDeadlines ends those). */
 static void lanReceive(int c)
 {
-    ULONG head[4];
-    struct pending *p;
-    int i;
-    dbg("lanReceive", c, conns[c].socket);
-    if (!connRead(c, head, sizeof head)) {
-        connLost(c);
-        return;
-    }
-    p = findPending(head[0]);
-    for (i = 0; i < 4; i++) {
+    struct conn *k = &conns[c];
+    dbg("lanReceive", c, k->socket);
+    k->heardAt = nowSeconds();
+    for (;;) {
+        struct pending *p = k->stage == ANS_HEAD ? NULL : findPending(k->head[0]);
         struct OSRequest *io = p ? p->io : NULL;
-        ULONG want, room, n;
-        if (!io || !io->os_Buf[i].ob_Length || !(io->os_Flags & (1UL << i)))
-            continue;
-        if (!connRead(c, &want, 4)) {
-            connLost(c);
-            return;
-        }
-        room = io->os_Buf[i].ob_Length;
-        n = want < room ? want : room;
-        if (!connRead(c, io->os_Buf[i].ob_Data, n)) {
-            connLost(c);
-            return;
-        }
-        for (; n < want; n++) {          /* more than fits: read and drop */
-            UBYTE drop;
-            if (!connRead(c, &drop, 1)) {
-                connLost(c);
-                return;
+        int r = 1;
+        switch (k->stage) {
+        case ANS_HEAD:
+            if ((r = connPiece(c, k->head, sizeof k->head)) > 0) {
+                k->piece = 0;
+                k->stage = ANS_NEXT;
             }
+            break;
+        case ANS_NEXT:                    /* the next buffer the service writes, or the end */
+            while (k->piece < 4 && !(io && io->os_Buf[k->piece].ob_Length && (io->os_Flags & (1UL << k->piece))))
+                k->piece++;
+            k->at = 0;
+            if (k->piece < 4) {
+                k->stage = ANS_LENGTH;
+                break;
+            }
+            dbg("lan answer id/status", k->head[0], k->head[1]);
+            k->recordAt = k->recordLength;   /* the rest of a sealed answer, if nobody wanted it */
+            k->stage = ANS_HEAD;
+            if (p)
+                completed(p, (LONG)k->head[1], k->head[2], k->head[3]);
+            break;
+        case ANS_LENGTH:
+            if ((r = connPiece(c, &k->word, 4)) > 0) {
+                k->at = 0;
+                k->stage = ANS_DATA;
+            }
+            break;
+        case ANS_DATA: {
+            ULONG room = io ? io->os_Buf[k->piece].ob_Length : 0, n = k->word < room ? k->word : room;
+            if ((r = connPiece(c, io ? io->os_Buf[k->piece].ob_Data : NULL, n)) > 0)
+                k->stage = ANS_DROP;      /* k->at is n: the bytes of word taken */
+            break;
         }
+        case ANS_DROP:                    /* more than fits: read and drop */
+            while (k->at < k->word) {
+                UBYTE drop[64];
+                LONG got = connTake(c, drop, k->word - k->at < sizeof drop ? k->word - k->at : sizeof drop);
+                if (got <= 0) {
+                    r = (int)got;
+                    break;
+                }
+                k->at += got;
+            }
+            if (r > 0) {
+                k->piece++;
+                k->stage = ANS_NEXT;
+            }
+            break;
+        }
+        if (r < 0) {
+            connLost(c);
+            return;
+        }
+        if (!r || k->socket < 0)
+            return;
     }
-    dbg("lan answer id/status", head[0], head[1]);
-    conns[c].recordAt = conns[c].recordLength;   /* the rest of a sealed answer, if nobody wanted it */
-    if (p)
-        completed(p, (LONG)head[1], head[2], head[3]);
 }
 
 static int connect3s(ULONG address, UWORD port)
 {
     struct sockaddr_in to;
-    LONG s = socket(AF_INET, SOCK_STREAM, 0), one = 1, zero = 0, err = 0;
+    LONG s = socket(AF_INET, SOCK_STREAM, 0), one = 1, err = 0;
     socklen_t errLength = sizeof err;
     fd_set ready;
     struct timeval wait;
@@ -565,8 +675,10 @@ static int connect3s(ULONG address, UWORD port)
             return -1;
         }
     }
-    IoctlSocket(s, FIONBIO, (char *)&zero);
+    /* It stays non-blocking (see LAN_DEADLINE), and the stack tells a dead
+     * Cradle or link by its keepalives. */
     setsockopt(s, IPPROTO_TCP, 1 /* TCP_NODELAY */, &one, sizeof one);
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
     return s;
 }
 
@@ -589,6 +701,10 @@ static int lanConnect(const struct mdns_cradle *cr)
     conns[free].users = 0;
     conns[free].sealed = 0;
     conns[free].record = NULL;
+    conns[free].recordSize = conns[free].recordFill = 0;
+    conns[free].stage = ANS_HEAD;
+    conns[free].at = 0;
+    conns[free].heardAt = nowSeconds();
     {
         UBYTE psk[32];
         int keyed = openservice_psk(cr->fingerprint, psk), ok = !keyed || connSeal(free, psk);
@@ -719,6 +835,31 @@ static void connLost(int c)
         }
     }
     browsedAt = 0;
+}
+
+/* On the worker's tick: a LAN request with no answer, and no bytes from its
+ * Cradle, for LAN_DEADLINE seconds means the Cradle or the network has gone.
+ * Its connection goes, and every request on it completes as OSERR_LOST, so
+ * the callers do the work on the 68k. */
+static void lanDeadlines(void)
+{
+    ULONG now = nowSeconds();
+    int i;
+    for (i = 0; i < MAX_PENDING; i++) {
+        struct pending *p = &pending[i];
+        struct conn *k;
+        if (!p->id || p->where != WHERE_LAN || p->conn >= MAX_CONNS || conns[p->conn].socket < 0)
+            continue;
+        k = &conns[p->conn];
+        if ((LONG)(now - p->sentAt) < 0)          /* the clock was set back */
+            p->sentAt = now;
+        if ((LONG)(now - k->heardAt) < 0)
+            k->heardAt = now;
+        if ((LONG)(now - p->sentAt) >= LAN_DEADLINE && (LONG)(now - k->heardAt) >= LAN_DEADLINE) {
+            dbg("lan deadline id/conn", p->id, p->conn);
+            connLost(p->conn);
+        }
+    }
 }
 
 /* ---- requests ------------------------------------------------------------------- */
@@ -1080,6 +1221,7 @@ static void workerMain(void)
                 for (i = 0; i < MAX_CONNS; i++)
                     if (conns[i].socket >= 0 && FD_ISSET(conns[i].socket, &ready))
                         lanReceive(i);
+            lanDeadlines();
             got = (got & mask) | (SetSignal(0, mask) & mask);
         } else
             got = Wait(mask);
