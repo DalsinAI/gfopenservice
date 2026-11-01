@@ -1,5 +1,5 @@
 /*
- * opentls on the Amiga: the transport is openservice.device's opentls.key/1
+ * opentls on the Amiga: the transport is gfopenservice.device's opentls.key/1
  * (opentls_amiga.h). Each request is one DoIO from the calling task, so
  * curl's threads can all use it at once.
  * MIT, Copyright (c) 2026 AmigaChrome Team.
@@ -9,7 +9,7 @@
 #include <exec/io.h>
 #include <proto/exec.h>
 
-#include "devices/openservice.h"
+#include "devices/gfopenservice.h"
 #include "opentls.h"
 #include "opentls_amiga.h"
 

@@ -1,6 +1,6 @@
 /*
  * webfetch: the Amiga's side of openweb.fetch/1 (docs/OPENWEB_FETCH.md), for
- * any program to link: OWFetch now, OpenBrowser later.
+ * any program to link: OWFetch now, GFOpenBrowser later.
  *
  *   struct wf_service s;
  *   wf_service_open(&s);                     -> 0, or OSERR_NOSERVICE
@@ -10,10 +10,10 @@
  *   wf_close(&s, fetch);
  *   wf_service_close(&s);
  *
- * Each call is one request through openservice.device, which takes it to
+ * Each call is one request through gfopenservice.device, which takes it to
  * the services card or a paired Cradle; or, when neither offers the
  * service (or WF_MODE_NATIVE asks for it), is answered here by the native
- * transport (src/wfnet*.c) over bsdsocket.library and opentls.library,
+ * transport (src/wfnet*.c) over bsdsocket.library and gfopentls.library,
  * with the same messages. The waits are in milliseconds, at most 2000: a
  * call answers sooner when something happens.
  *
@@ -30,7 +30,7 @@
 #define OPENWEB_WEBFETCH_H
 
 #include <exec/types.h>
-#include "devices/openservice.h"
+#include "devices/gfopenservice.h"
 
 #define WF_SERVICE_NAME "openweb.fetch/1"
 
@@ -90,8 +90,8 @@
 #define WF_WS_END    0x20UL
 
 /* wf_service_open_mode */
-#define WF_MODE_AUTO    0       /* the card or a Cradle; else native (ENV:OpenWeb/Fetch "native" forces native) */
-#define WF_MODE_NATIVE  1       /* this Amiga's own TCP/IP and OpenTLS only */
+#define WF_MODE_AUTO    0       /* the card or a Cradle; else native (ENV:GFOpenWeb/Fetch "native" forces native) */
+#define WF_MODE_NATIVE  1       /* this Amiga's own TCP/IP and GFOpenTLS only */
 #define WF_MODE_SERVICE 2       /* the card or a Cradle only */
 #define WF_WHERE_NATIVE 3       /* struct wf_service's where, beside OSWHERE_CARD and OSWHERE_LAN */
 

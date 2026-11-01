@@ -1070,7 +1070,7 @@ assert hd["headers"]["set-cookie"] == ["a=1", "b=2"] and hd["flags"] & H_LENGTH 
 assert "transport=native" in hd["info"], hd["info"]
 hd, body, _ = F.fetch(f"{base}/headers", headers="X-Mine: 1\nHost: wrong\nConnection: close\n")
 sent = body.decode().lower()
-assert "x-mine: 1" in sent and f"host: 127.0.0.1:{HTTP}" in sent and "connection: keep-alive" in sent and "openweb-fetch/2" in sent, sent
+assert "x-mine: 1" in sent and f"host: 127.0.0.1:{HTTP}" in sent and "connection: keep-alive" in sent and "gfopenweb-fetch/2" in sent, sent
 hd, body, _ = F.fetch(f"{base}/redirect")
 assert hd["status"] == 302 and hd["headers"]["location"] == ["/hello"], hd
 hd, body, _ = F.fetch(f"{base}/missing")
@@ -1255,7 +1255,7 @@ assert hd["headers"]["set-cookie"] == ["s=1", "t=2"] and hd["flags"] & H_LENGTH 
 hd, body, _ = F.fetch(f"{h2base}/headers", headers="X-Mine: yes\nAccept: */*\nConnection: close\n")
 req = body.decode()
 assert ":method: GET" in req and ":scheme: https" in req and f":authority: localhost:{H2}" in req and ":path: /headers" in req, req
-assert "x-mine: yes" in req and "connection" not in req and "user-agent: OpenWeb-Fetch/2" in req, req
+assert "x-mine: yes" in req and "connection" not in req and "user-agent: GFOpenWeb-Fetch/2" in req, req
 hd, body, _ = F.fetch(f"{h2base}/missing")
 assert hd["status"] == 404
 hd, body, _ = F.fetch(f"{h2base}/hello", method="HEAD")

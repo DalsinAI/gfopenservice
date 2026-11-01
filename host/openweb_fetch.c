@@ -1700,7 +1700,7 @@ static int parse_request(struct fetch *f, const uint8_t *text, uint32_t n)
     {
         char tail[200];
         int k = snprintf(tail, sizeof tail, "%s%s%s",
-                         ua ? "" : "User-Agent: OpenWeb-Fetch/1\r\n",
+                         ua ? "" : "User-Agent: GFOpenWeb-Fetch/1\r\n",
                          decode ? "Accept-Encoding: " ACCEPT_ENCODING "\r\n" : "",
                          keeping() ? "Connection: keep-alive\r\n" : "Connection: close\r\n");
         if (f->flags & WF_BODY) {

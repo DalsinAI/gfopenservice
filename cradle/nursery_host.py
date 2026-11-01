@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A Cradle in the nursery: services for Amigas on the LAN.
 
-Advertises over mDNS (nursery_advertise.py) and serves openservice.device's
+Advertises over mDNS (nursery_advertise.py) and serves gfopenservice.device's
 LAN frames on TCP: each request is the services card's 64-byte entry, then
 the buffers the service reads; each answer is the 16-byte completion, then
 for each buffer the service writes a u32 byte count and the bytes.

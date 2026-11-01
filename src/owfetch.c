@@ -2,12 +2,12 @@
  * OWFetch: fetches a URL through openweb.fetch (docs/OPENWEB_FETCH.md),
  * on the services card or a paired Cradle (the network and TLS on the x86
  * or ARM64 cores), or when neither is there, natively over this Amiga's
- * TCP/IP stack and OpenTLS. Prints the status line and the headers, then
+ * TCP/IP stack and GFOpenTLS. Prints the status line and the headers, then
  * writes the body to TO, or to the console.
  *
  * Usage: OWFetch URL/A TO/K HEAD/S HEADER/M METHOD/K FROM/K TIMEOUT/K/N
  *                RAW/S QUIET/S INFO/S NATIVE/S
- *   NATIVE: this Amiga's own TCP/IP and OpenTLS, even with a card there.
+ *   NATIVE: this Amiga's own TCP/IP and GFOpenTLS, even with a card there.
  *   HEADER: one or more "Name: value", sent as they are (Cookie, Accept...).
  *   HEAD: the head only. FROM: a file sent as the body (POST unless METHOD).
  *   RAW: the body as the server sent it (otherwise gzip, deflate and br are
@@ -30,7 +30,7 @@
 
 const char version[] __attribute__((used)) = "$VER: OWFetch 0.2 (23.10.2026)";
 
-/* A TLS handshake wants 16 KB of stack free (opentls.library). */
+/* A TLS handshake wants 16 KB of stack free (gfopentls.library). */
 unsigned long __stack = 65536;
 
 #define PIECE (256UL << 10)
@@ -133,7 +133,7 @@ int main(void)
     }
     wf_request(request, request_room, method, (const char *)args[URL], headers, count);
     if (args[INFO])
-        printf("(%s)\n", s.where == WF_WHERE_NATIVE ? "native: this Amiga's TCP/IP and OpenTLS"
+        printf("(%s)\n", s.where == WF_WHERE_NATIVE ? "native: this Amiga's TCP/IP and GFOpenTLS"
                           : s.where == OSWHERE_LAN ? "a paired Cradle" : "the services card");
     if ((status = wf_open(&s, request, 0, flags, body_length, args[TIMEOUT] ? (ULONG)*(LONG *)args[TIMEOUT] : 0,
                           piece, part, &fetch)) != OSERR_OK) {

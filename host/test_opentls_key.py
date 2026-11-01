@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, x25519, 
 import opentls_key as otk
 
 spki = lambda k: k.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-msg = b"OpenBrowser key offload probe"
+msg = b"GFOpenBrowser key offload probe"
 d256 = hashlib.sha256(msg).digest()
 
 def verify(arg, md, key_der, digest, sig, salt=0):

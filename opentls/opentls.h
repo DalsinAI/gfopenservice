@@ -2,7 +2,7 @@
  * opentls: TLS public-key work at pace. A program using OpenSSL 3 (AmiSSL
  * on the Amiga) calls opentls_install() once; from then on the key maths of
  * every TLS handshake (certificate and handshake signatures, the key
- * exchange) goes to the transport, normally openservice.device's
+ * exchange) goes to the transport, normally gfopenservice.device's
  * opentls.key/1, and is done here when the transport cannot.
  * MIT, Copyright (c) 2026 AmigaChrome Team.
  */

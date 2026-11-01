@@ -25,12 +25,12 @@
  * fingerprint (its mDNS fp=), then, when paired with a code, the key in hex
  * and its name. A line with the fingerprint alone allows unsealed frames
  * (test Cradles started with --allow-plain). */
-#define OPENSERVICE_PAIRED_FILE "ENV:OpenService/Paired"
-#define OPENSERVICE_PAIRED_KEEP "ENVARC:OpenService/Paired"
+#define OPENSERVICE_PAIRED_FILE "ENV:GFOpenService/Paired"
+#define OPENSERVICE_PAIRED_KEEP "ENVARC:GFOpenService/Paired"
 
 /* This Amiga's identity, 16 bytes in hex, made by the first pairing. */
-#define OPENSERVICE_ID_FILE "ENV:OpenService/ID"
-#define OPENSERVICE_ID_KEEP "ENVARC:OpenService/ID"
+#define OPENSERVICE_ID_FILE "ENV:GFOpenService/ID"
+#define OPENSERVICE_ID_KEEP "ENVARC:GFOpenService/ID"
 
 /* 1 when this fingerprint is in OPENSERVICE_PAIRED_FILE. */
 int openservice_paired(const char *fingerprint);

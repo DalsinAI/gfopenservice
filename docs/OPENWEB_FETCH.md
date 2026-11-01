@@ -3,7 +3,7 @@
 HTTP and HTTPS fetches for an Amiga: the network and TLS run on the x86 or
 ARM64 cores, or on the Amiga itself (the native transport, below), and the
 Amiga gets the status, the headers and the body. It is
-the first bridge service for the browser (AmigaChrome's
+the first bridge service for the browser (AmiCradle's
 `MAGIC_FUNCTIONS_AND_BRIDGE.md`, section 12), and any other program may use
 it. Host code: `host/openweb_fetch.c`, built into `host/libopenwebfetch.so`
 (entry `wf_call`, and `wf_start` and `wf_cancel` for the services card), with
@@ -12,7 +12,7 @@ OpenSSL 3, zlib and libbrotlidec. On the Amiga: the client
 (`src/owfetch.c`).
 
 Status: v2, 23 October 2026: the native transport on the Amiga's own
-TCP/IP and OpenTLS, with HTTP/2, WebSocket (ops 8 to 10), proxies and HTTP
+TCP/IP and GFOpenTLS, with HTTP/2, WebSocket (ops 8 to 10), proxies and HTTP
 auth; asynchronous use from one task (`wf_async_start`, `wf_wait`). The
 service's name stays `openweb.fetch/1`: v1's messages are unchanged, and
 v2 only adds ops, flags and info lines. Before that, v1, 12 October 2026. Offered on the services card. Not yet on the
@@ -31,7 +31,7 @@ goes with OPEN, or in chunks with SEND. CANCEL stops one fetch; CLOSE ends
 it. The connection goes back to a pool when the answer is done, for the
 next fetch to the same place.
 
-The card's completions are the rings, and openservice.device turns each
+The card's completions are the rings, and gfopenservice.device turns each
 into a reply on the caller's port, so a program waits on a signal bit and
 can have many fetches in flight, each with its own handle. A HEAD or READ
 that has to wait is held by the library, not by one of the card's workers,
@@ -88,7 +88,7 @@ The first line is the method and the absolute URL (`http://` or
 header per line, as it should be sent. The host writes `Host`,
 `Connection` (`keep-alive`), `Content-Length` or `Transfer-Encoding`, and with
 `WF_DECODE` `Accept-Encoding`; the Amiga's own copies of those are dropped.
-It adds `User-Agent: OpenWeb-Fetch/1` (native: `OpenWeb-Fetch/2`) when there is none. Everything else
+It adds `User-Agent: GFOpenWeb-Fetch/1` (native: `GFOpenWeb-Fetch/2`) when there is none. Everything else
 goes as it is: the Amiga keeps its own cookie jar and sends `Cookie`
 itself.
 
@@ -204,7 +204,7 @@ an unknown handle or op); -4 above; -5 when 64 fetches are open already.
 The card runs a library call on one of its four workers. A HEAD or READ
 with a wait would hold that worker for up to 2 s, so the library has a
 second entry for the card, `wf_start` (`host/openweb_fetch.h`), with
-`wf_cancel` beside it (AmigaChrome's `services.c` and `SERVICES_CARD.md`,
+`wf_cancel` beside it (AmiCradle's `services.c` and `SERVICES_CARD.md`,
 "Held requests"):
 
 - `wf_start` is `wf_call` with the card's id for the request and the card's
@@ -307,7 +307,7 @@ more process to start, watch and stop from inside the emulator.
 `src/webfetch.c` holds the calls, so any program can link it: open the
 service, start a fetch, read its head (parsed into status, flags, headers
 and info), read and send body parts, cancel, close. Each call is one
-request through openservice.device. `OWFetch` is the command built on it:
+request through gfopenservice.device. `OWFetch` is the command built on it:
 
 ```
 OWFetch URL [TO file] [HEAD] [HEADER "Name: value" ...] [METHOD m] [FROM file]
@@ -320,7 +320,7 @@ one or more `"Name: value"` strings. `HEAD` asks for the head only, `FROM`
 sends a file as the body (POST unless `METHOD` says otherwise), `RAW` keeps
 the body as the server sent it (otherwise it is decoded: natively by the
 datatypes, see "Compressed bodies"), `QUIET` prints nothing but errors, and
-`NATIVE` uses this Amiga's own TCP/IP and OpenTLS even with a card there
+`NATIVE` uses this Amiga's own TCP/IP and GFOpenTLS even with a card there
 (`INFO` says which is used). Ctrl-C cancels. It returns 0 for an answer below 400, 5 for 400 and above,
 10 when the fetch failed (DNS, TLS, ...), and 20 when it could not start.
 
@@ -328,9 +328,9 @@ datatypes, see "Compressed bodies"), `QUIET` prints nothing but errors, and
 
 When no services card or paired Cradle offers `openweb.fetch/1` (or the
 program asks with `wf_service_open_mode(s, WF_MODE_NATIVE)`, or
-`ENV:OpenWeb/Fetch` is `native`, or `OWFetch ... NATIVE`), `src/webfetch.c`
+`ENV:GFOpenWeb/Fetch` is `native`, or `OWFetch ... NATIVE`), `src/webfetch.c`
 answers every call itself: the same ops, buffers, heads and errors, over
-the Amiga's own bsdsocket.library (any stack) and opentls.library. Its
+the Amiga's own bsdsocket.library (any stack) and gfopentls.library. Its
 `where` is `WF_WHERE_NATIVE`. No curl, nghttp2 or libpsl: the protocol code
 is our own, written from the RFCs.
 
@@ -345,7 +345,7 @@ is our own, written from the RFCs.
   (`include/openweb/wfnet.h`): connect, send, receive, close, wait, TLS
   over a socket, time, memory, random bytes, the environment, and the
   decoders. `src/wfnet_amiga.c` fills it with bsdsocket.library and
-  opentls.library (their bases in a struct of their own, never in
+  gfopentls.library (their bases in a struct of their own, never in
   globals); `host/wfnet_posix.c` with POSIX sockets and OpenSSL, for the
   tests on Linux.
 - Integers only. 68k code (the 68040, GCC 16.2, `-Os`): the protocol code
@@ -353,7 +353,7 @@ is our own, written from the RFCs.
   `wfnet_hpack.c` 4.2, `wfnet_dec.c` 1.2), the Amiga side 3.3 KB,
   `webfetch.c` 3.7 KB; no data or bss.
 - Memory: each fetch has its window (64 KB) and about 2 KB; each
-  connection about 18 KB, and OpenTLS's 33 KB with TLS. An HTTP/2 header
+  connection about 18 KB, and GFOpenTLS's 33 KB with TLS. An HTTP/2 header
   block is decoded into 64 KB that is freed straight after.
 - Nothing runs in the background: each call moves every fetch of its
   `wf_service` on, then waits on all their sockets for at most its wait.
@@ -479,22 +479,22 @@ three methods and `DisposeDTObject()` (`src/wfnet_amiga.c`), and the host
 test gives it opendatatypes' own portable core instead (`host/wfnet_dt.c`,
 below). `host/wfnet_posix.c` alone plugs zlib into the hook.
 
-What an Amiga needs, an OpenBrowser build too: stream.datatype,
+What an Amiga needs, a GFOpenBrowser build too: stream.datatype,
 gzip.datatype and brotli.datatype in `SYS:Classes/DataTypes`, and
-z.library (OpenZlib) in `LIBS:` for gzip.datatype. Without gzip.datatype
+z.library (GFOpenZlib) in `LIBS:` for gzip.datatype. Without gzip.datatype
 or z.library, gzip and deflate are not asked for; without brotli.datatype,
 br is not. Whether OS 3.2's own datatypes.library takes stream.datatype's
 new group (`GID_DATA`) is still to be checked on the bench.
 
-### TLS through OpenTLS
+### TLS through GFOpenTLS
 
-opentls.library 1.x: TLS 1.2 and 1.3, the certificate checked against
-OpenTLS's trust store and the host's name (`OTV_FULL`), so every
+gfopentls.library 1.x: TLS 1.2 and 1.3, the certificate checked against
+GFOpenTLS's trust store and the host's name (`OTV_FULL`), so every
 handshake that succeeds sets bit 1. The info text gives `tls=`, `cipher=`,
-`verified=yes` and `subject=` (OpenTLS's `OT_GetPeerName`); on a failure
-`error=` with `OT_GetErrorText`. ALPN is OpenTLS's (`OT_SetALPN`,
-`OT_GetALPN`), so nothing was missing for HTTP/2. What OpenTLS could still
-give: SHA-1 and MD5 through opencrypto.library (wfnet carries its own,
+`verified=yes` and `subject=` (GFOpenTLS's `OT_GetPeerName`); on a failure
+`error=` with `OT_GetErrorText`. ALPN is GFOpenTLS's (`OT_SetALPN`,
+`OT_GetALPN`), so nothing was missing for HTTP/2. What GFOpenTLS could still
+give: SHA-1 and MD5 through gfopencrypto.library (wfnet carries its own,
 5.6 KB with SHA-256 and the auth code, used for a few hashes per request),
 the issuer and expiry of the server's certificate for the info text, and
 saying whether a non-blocking `OT_Handshake` waits to read or to write
@@ -537,7 +537,7 @@ for (;;) {
 - **The WebSocket ops and the `:proxy` line on the card's host library**,
   and HTTP/2 there: the native transport has them, the card answers -2.
 - **TLS session resumption** for new connections to a host already seen
-  (OpenTLS has `OT_GetSession`); HTTPS proxies and SOCKS; IPv6 in the
+  (GFOpenTLS has `OT_GetSession`); HTTPS proxies and SOCKS; IPv6 in the
   Amiga side (bsdsocket's `gethostbyname` is IPv4); the name resolved
   without blocking.
 - **SEND answered later** too, when the upload queue is full, as HEAD and
@@ -555,7 +555,7 @@ for (;;) {
 ### The PiStorm back end (design only)
 
 The appliance's PiStorm plan (amigachrome `appliance/pistorm/README.md`)
-runs Linux on the Pi with the AmigaChrome runtime on its ARM64 cores, and
+runs Linux on the Pi with the AmiCradle runtime on its ARM64 cores, and
 the A1200's own bus for its keyboard, mouse and floppy. There the services
 card is the same card in the same runtime, so this service needs no change:
 
@@ -601,7 +601,7 @@ with AddressSanitizer and UBSan, and with ThreadSanitizer.
 
 `host/test_wfnet.py` runs the native transport's own code, built for
 Linux as `host/libwfnet.so` (POSIX sockets, and OpenSSL and zlib in place
-of OpenTLS and the datatypes), against servers it starts on 127.0.0.1:
+of GFOpenTLS and the datatypes), against servers it starts on 127.0.0.1:
 first the pieces against their published examples (RFC 7541 Appendix C
 C.2 to C.6, decoded and encoded byte for byte, with and without Huffman
 and with eviction; Huffman round trips; MD5, SHA-1 and SHA-256 against
@@ -637,7 +637,7 @@ about 1.5 s, so about 100 MB/s into the Amiga's memory; the bodies written
 to a file had the server's MD5.
 
 Measured later the same day on the same lab, with the card that holds
-calls (AmigaChrome's `services/async-complete-20261012`), servers on the
+calls (AmiCradle's `services/async-complete-20261012`), servers on the
 same machine, the time from the first request to the last as the server
 saw them, for a page of 50 small fetches (2 KB each) one after another:
 

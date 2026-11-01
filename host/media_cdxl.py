@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Turns a movie into CDXL on the Cradle, through media.cdxl/1 (cdxl.h,
-docs/MEDIA_CDXL.md), the same code an Amiga calls through openservice.device.
+docs/MEDIA_CDXL.md), the same code an Amiga calls through gfopenservice.device.
 
 usage: media_cdxl.py MOVIE OUT.cdxl [--preset ecs|ecs-ham|aga|aga-ham|rtg]
            [--size WxH] [--fps N] [--planes N] [--rate HZ] [--stereo] [--no-sound]

@@ -134,7 +134,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 img[y, x] = (x * 65535 // w, y * 65535 // h, 32896)
         p = os.path.join(tmp, "g.dng")
         tifffile.imwrite(p, img, photometric=34892, extratags=[(50706, "B", 4, b"\1\4\0\0", True),
-                                                              (50708, "s", 0, "OpenService test", True)])
+                                                              (50708, "s", 0, "GFOpenService test", True)])
         data = open(p, "rb").read()
         st, pw, ph, out = call(PROBE, data, room=24)
         assert st == 0 and struct.unpack(">6I", out[1])[1] == fourcc("RAW "), st

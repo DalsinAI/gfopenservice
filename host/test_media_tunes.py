@@ -30,14 +30,14 @@ def sid():
                   0xa9, 0x11, 0x8d, 0x04, 0xd4,      # triangle, gate on
                   0x60))
     head = b"PSID" + struct.pack(">HHHHHHHI", 2, 0x7c, 0, 0x1000, 0x1003, 1, 1, 0)
-    head += b"OpenService test".ljust(32, b"\0") + b"AmigaChrome Team".ljust(32, b"\0") + b"2026".ljust(32, b"\0")
+    head += b"GFOpenService test".ljust(32, b"\0") + b"AmigaChrome Team".ljust(32, b"\0") + b"2026".ljust(32, b"\0")
     head += struct.pack(">HBBH", 0, 0, 0, 0)
     return head + struct.pack("<H", 0x1000) + code
 
 
 def mod():
     """A 4-channel M.K. module: one looping square wave, one note, one pattern."""
-    out = b"OpenService test".ljust(20, b"\0")
+    out = b"GFOpenService test".ljust(20, b"\0")
     out += b"square".ljust(22, b"\0") + struct.pack(">HBBHH", 32, 0, 64, 0, 32)
     out += (b"\0" * 22 + struct.pack(">HBBHH", 0, 0, 0, 0, 1)) * 30
     out += bytes((1, 127)) + bytes(128) + b"M.K."

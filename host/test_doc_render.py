@@ -18,7 +18,7 @@ def call(op, data, maxw=0, maxh=0, room=0, page=0):
 with tempfile.TemporaryDirectory() as tmp:
     os.environ["OPENSERVICE_CACHE"] = os.path.join(tmp, "cache")
     html = os.path.join(tmp, "two.html")
-    open(html, "w").write("<html><body><h1>OpenAmiga page one</h1><p>Hello from the Cradle.</p>"
+    open(html, "w").write("<html><body><h1>GFOpenAmiga page one</h1><p>Hello from the Cradle.</p>"
                           "<p style='page-break-before: always'>Second page text</p></body></html>")
     csv = os.path.join(tmp, "table.csv")
     open(csv, "w").write("Name,Count\nAmiga,1200\nCradle,1\n")
@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert px[0] == 255 and 50 < dark < w * h // 4, (ext, dark)      # some text, mostly white
         st, nbytes, _, out = call(TEXT, data, room=65536)
         txt = out[1].decode("latin-1")
-        want = "OpenAmiga" if ext != "xlsx" else "Cradle"
+        want = "GFOpenAmiga" if ext != "xlsx" else "Cradle"
         assert st == 0 and want in txt, (ext, st, txt[:80])
         t2 = time.time()
         if ext != "xlsx":

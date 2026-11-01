@@ -13,7 +13,7 @@
 #define MDNS_ADDRESSES 8
 
 struct mdns_cradle {
-    char instance[128];   /* "daletop._amigachrome._tcp.local" */
+    char instance[128];   /* "daletop._amicradle._tcp.local" */
     char target[128];     /* the SRV target, "daletop.local" */
     UWORD port;
     ULONG address;        /* IPv4, host order: the first A record, 0 when none came */

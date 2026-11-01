@@ -312,10 +312,10 @@ print("GET: 200, both Set-Cookie headers back in order, length known, body right
 hd, body, _ = fetch(base + "/headers", headers="Cookie: session=42; theme=dark\r\nX-Amiga: 1200\nConnection: close\nHost: elsewhere\n")
 sent = body.decode()
 assert "Cookie: session=42; theme=dark\n" in sent and "X-Amiga: 1200\n" in sent, sent
-assert f"Host: 127.0.0.1:{port}\n" in sent and "Connection: keep-alive\n" in sent and "User-Agent: OpenWeb-Fetch/1\n" in sent, sent
+assert f"Host: 127.0.0.1:{port}\n" in sent and "Connection: keep-alive\n" in sent and "User-Agent: GFOpenWeb-Fetch/1\n" in sent, sent
 assert "elsewhere" not in sent and "close" not in sent, sent
 hd, body, _ = fetch(base + "/headers", headers="User-Agent: OWFetch/0.1\n")
-assert "User-Agent: OWFetch/0.1\n" in body.decode() and "OpenWeb-Fetch" not in body.decode()
+assert "User-Agent: OWFetch/0.1\n" in body.decode() and "GFOpenWeb-Fetch" not in body.decode()
 print("request headers: Cookie and others as given; Host, Connection and User-Agent from the host")
 
 hd, body, _ = fetch(base + "/redirect")

@@ -66,7 +66,7 @@ struct wf_buffer {
 int wf_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct wf_buffer buf[4],
             uint32_t *result, uint32_t *aux);
 
-/* Answering later, for the services card (AmigaChrome's services.c): wf_start
+/* Answering later, for the services card (AmiCradle's services.c): wf_start
  * is wf_call with the card's id for the request and its completion. It
  * answers now (returns the status, sets *result and *aux), or returns
  * WF_LATER: a HEAD or READ with a wait and nothing to give yet is held, and

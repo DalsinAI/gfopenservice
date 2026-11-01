@@ -4,7 +4,7 @@ _Written 6 October 2026 at about 23:55 UTC, while all work is paused on @SacredT
 
 ## What this repo is
 
-Nursery: openservice.device on the Amiga, the boards that carry services, the paired Cradles on the LAN and the services they run (media.decode/1, doc.render/1, opentls.key/1).
+Nursery: gfopenservice.device on the Amiga, the boards that carry services, the paired Cradles on the LAN and the services they run (media.decode/1, doc.render/1, opentls.key/1).
 
 ## Where it stands
 
@@ -24,7 +24,7 @@ media.decode/1 draws SVG and decodes icons and animated PNG/GIF; doc.render/1 us
 ## Next step
 
 1. Add THIRD_PARTY_NOTICES.md (TweetNaCl, poly1305-donna).
-2. TLS key maths to the services card for OpenBrowser.
+2. TLS key maths to the services card for GFOpenBrowser.
 
 ## Waiting on @SacredTrees
 

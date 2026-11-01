@@ -21,7 +21,7 @@ for a guest's file; anything else is refused.
 The Amiga side is openamigaimage's datatypes (`heif.datatype`,
 `opensound.datatype`, `openvideo.datatype`, and `webm.datatype` for its
 sound). They
-assume a services card, or PiStorm-class or AmigaChrome-class networking to
+assume a services card, or PiStorm-class or AmiCradle-class networking to
 a Cradle, so the decoded pixels come back whole.
 
 | Op | Name | Request | Answer |

@@ -14,7 +14,7 @@ We are The AmigaChrome Team, who build Nursery alongside SacredTrees:
 
 ## Copyright holder
 
-Nursery's own code, `openservice.device`, the Cradle-side services and the documents are
+Nursery's own code, `gfopenservice.device`, the Cradle-side services and the documents are
 Copyright (c) 2026 AmigaChrome Team, released under the MIT licence (`LICENSE`).
 
 ## Third-party work in this repository
