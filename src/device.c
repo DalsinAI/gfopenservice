@@ -395,22 +395,6 @@ static int sendAll(LONG s, const void *data, ULONG length)
     return 1;
 }
 
-/* The session handshake's reads: each part within LAN_HANDSHAKE seconds. */
-static int recvAll(LONG s, void *data, ULONG length)
-{
-    UBYTE *p = data;
-    while (length) {
-        LONG n = recv(s, p, length, 0);
-        if (n < 0 && Errno() == B_EWOULDBLOCK && waitFor(s, 0, LAN_HANDSHAKE))
-            continue;
-        if (n <= 0)
-            return 0;
-        p += n;
-        length -= n;
-    }
-    return 1;
-}
-
 /* What has come on s, up to n bytes, without waiting: 0 when nothing has,
  * -1 when the Cradle closed or the socket failed. */
 static LONG recvSome(LONG s, void *data, ULONG n)
@@ -529,18 +513,50 @@ static int connWrite(int c, const UBYTE *const *pieces, const ULONG *lengths, in
     return ok;
 }
 
+/* want bytes of c's stream (sealed or not) into data by until (seconds,
+ * nowSeconds): 0 when they have not all come by then, or the connection
+ * failed, or a record did not open. For the session handshake. */
+static int connReadBy(int c, UBYTE *data, ULONG want, ULONG until)
+{
+    ULONG at = 0;
+    while (at < want) {
+        LONG got = connTake(c, data + at, want - at), left;
+        if (got < 0)
+            return 0;
+        if (got > 0) {
+            at += got;
+            continue;
+        }
+        left = (LONG)(until - nowSeconds());
+        if (left > LAN_HANDSHAKE)              /* the clock was set back */
+            left = LAN_HANDSHAKE;
+        if (left <= 0 || !waitFor(conns[c].socket, 0, left))
+            return 0;
+    }
+    return 1;
+}
+
+#define PROOF_ID 0                           /* no pending request has id 0 */
+
 /* The session handshake on a fresh connection to a Cradle paired with a
- * code (its key in hand): 0 when the Cradle refuses or answers wrongly. */
+ * code (its key in hand): 0 when the Cradle refuses or answers wrongly.
+ * The "OSE1" answer proves nothing (anyone on the LAN can send it, and the
+ * fp= it was found by is public), so the session's first request is a
+ * sealed directory LIST, and the connection counts only when its sealed
+ * answer opens with the key, all within LAN_HANDSHAKE seconds. */
 static int connSeal(int c, const UBYTE psk[32])
 {
     struct conn *k = &conns[c];
-    UBYTE hello[36], answer[20], salt[32], keys[64];
+    UBYTE hello[36], answer[20], salt[32], keys[64], e[64];
+    const UBYTE *piece = e;
+    ULONG length = sizeof e, head[4], until = nowSeconds() + LAN_HANDSHAKE;
     if (!openservice_amiga_id(hello + 4))
         return 0;
     memcpy(hello, "OSE1", 4);
     os_random(hello + 20, 16, 0);
-    if (!sendAll(k->socket, hello, sizeof hello) || !recvAll(k->socket, answer, 4) || memcmp(answer, "OSE1", 4)
-        || !recvAll(k->socket, answer + 4, 16))
+    k->sealed = 0;
+    if (!sendAll(k->socket, hello, sizeof hello) || !connReadBy(c, answer, sizeof answer, until)
+        || memcmp(answer, "OSE1", 4))
         return 0;
     memcpy(salt, hello + 20, 16);
     memcpy(salt + 16, answer + 4, 16);
@@ -551,7 +567,15 @@ static int connSeal(int c, const UBYTE psk[32])
     k->txCount = k->rxCount = 0;
     k->record = NULL;
     k->recordLength = k->recordAt = 0;
+    k->recordSize = k->recordFill = 0;
     k->sealed = 1;
+    /* The proof: LIST with no room for the names, so the answer is the
+     * completion alone, in one record sealed with the Cradle's key. */
+    putEntry(e, PROOF_ID, 0, DIR_LIST, NULL);
+    if (!connWrite(c, &piece, &length, 1) || !connReadBy(c, (UBYTE *)head, sizeof head, until)
+        || head[0] != PROOF_ID)
+        return 0;
+    k->recordAt = k->recordLength;           /* anything else in that record is not an answer */
     return 1;
 }
 
@@ -682,41 +706,61 @@ static int connect3s(ULONG address, UWORD port)
     return s;
 }
 
+/* The open connection to Cradle cr, at any of its addresses, or -1. */
+static int connTo(const struct mdns_cradle *cr)
+{
+    int c, a;
+    for (c = 0; c < MAX_CONNS; c++)
+        for (a = 0; a < cr->addressCount; a++)
+            if (conns[c].socket >= 0 && conns[c].address == cr->addresses[a] && conns[c].port == cr->port)
+                return c;
+    return -1;
+}
+
+/* A connection to Cradle cr: each address mDNS gave for it in turn (any
+ * host on the LAN can answer for its name), and the first that proves the
+ * pairing key (connSeal) is used; one that cannot is closed. */
 static int lanConnect(const struct mdns_cradle *cr)
 {
-    int c, free = -1;
-    for (c = 0; c < MAX_CONNS; c++) {
-        if (conns[c].socket >= 0 && conns[c].address == cr->address && conns[c].port == cr->port)
-            return c;
+    int c, free = -1, a;
+    UBYTE psk[32];
+    int keyed;
+    if ((c = connTo(cr)) >= 0)
+        return c;
+    for (c = 0; c < MAX_CONNS; c++)
         if (conns[c].socket < 0 && free < 0)
             free = c;
-    }
     if (free < 0)
         return -1;
-    conns[free].socket = connect3s(cr->address, cr->port);
-    if (conns[free].socket < 0)
-        return -1;
-    conns[free].address = cr->address;
-    conns[free].port = cr->port;
-    conns[free].users = 0;
-    conns[free].sealed = 0;
-    conns[free].record = NULL;
-    conns[free].recordSize = conns[free].recordFill = 0;
-    conns[free].stage = ANS_HEAD;
-    conns[free].at = 0;
-    conns[free].heardAt = nowSeconds();
-    {
-        UBYTE psk[32];
-        int keyed = openservice_psk(cr->fingerprint, psk), ok = !keyed || connSeal(free, psk);
-        dbg("lanConnect keyed/ok", keyed, ok);
-        memset(psk, 0, sizeof psk);
-        if (!ok) {                       /* paired with a code, but the Cradle disagrees */
-            CloseSocket(conns[free].socket);
-            conns[free].socket = -1;
-            return -1;
-        }
+    keyed = openservice_psk(cr->fingerprint, psk);
+    for (a = 0; a < cr->addressCount; a++) {
+        int ok;
+        conns[free].socket = connect3s(cr->addresses[a], cr->port);
+        if (conns[free].socket < 0)
+            continue;
+        conns[free].address = cr->addresses[a];
+        conns[free].port = cr->port;
+        conns[free].users = 0;
+        conns[free].sealed = 0;
+        conns[free].record = NULL;
+        conns[free].recordSize = conns[free].recordFill = 0;
+        conns[free].stage = ANS_HEAD;
+        conns[free].at = 0;
+        conns[free].heardAt = nowSeconds();
+        ok = !keyed || connSeal(free, psk);
+        dbg("lanConnect address/ok", cr->addresses[a], ok);
+        if (ok)
+            break;
+        /* paired with a code, but this host cannot prove it: the next address */
+        CloseSocket(conns[free].socket);
+        conns[free].socket = -1;
+        conns[free].sealed = 0;
+        if (conns[free].record)
+            FreeVec(conns[free].record);
+        conns[free].record = NULL;
     }
-    return free;
+    memset(psk, 0, sizeof psk);
+    return conns[free].socket >= 0 ? free : -1;
 }
 
 /* The connection to a paired Cradle offering name, opened when needed. */
@@ -741,9 +785,8 @@ static int lanFor(const char *name)
         struct mdns_cradle *cr = &cradles[i];
         if (!cr->address || !mdns_offers(cr, name) || !openservice_paired(cr->fingerprint))
             continue;
-        for (c = 0; c < MAX_CONNS; c++)
-            if (conns[c].socket >= 0 && conns[c].address == cr->address && conns[c].port == cr->port)
-                return c;
+        if ((c = connTo(cr)) >= 0)
+            return c;
     }
     DateStamp(&ds);
     now = (ULONG)ds.ds_Days * 86400 + ds.ds_Minute * 60 + ds.ds_Tick / TICKS_PER_SECOND;

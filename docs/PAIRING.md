@@ -52,6 +52,14 @@ direction; the length is the additional data. Inside are the same frames
 as before (`SERVICES_CARD.md`'s entry and buffers; the completion and the
 written buffers). A record that does not open closes the connection.
 
+The `OSE1` answer proves nothing: any host on the LAN can send it, and the
+`fp=` a Cradle is found by is public. So the device's first sealed record
+on a new session is a directory LIST (id 0, no buffers), and it uses the
+connection only when the sealed completion for id 0 comes back and opens
+with the key, within 10 s of the connection's start. Otherwise it closes
+it and tries the Cradle's next address: mDNS keeps every A record that
+came for the Cradle's SRV target (up to 8), not the last.
+
 ## On the Amiga
 
 The device and `Nursery` carry their own SHA-256, HMAC, HKDF,
