@@ -7,6 +7,7 @@
 #include <exec/types.h>
 #include <dos/dos.h>
 #include <proto/exec.h>
+#include <proto/dos.h>
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -195,6 +196,15 @@ static int sendQuestion(LONG s, int legacy)
     return sendto(s, q, n, 0, (struct sockaddr *)&to, sizeof to) == n;
 }
 
+/* Ticks (1/50 s) since t0, by dos.library's clock. */
+static LONG ticksSince(const struct DateStamp *t0)
+{
+    struct DateStamp t;
+    DateStamp(&t);
+    return ((t.ds_Days - t0->ds_Days) * 1440 + (t.ds_Minute - t0->ds_Minute)) * 60 * TICKS_PER_SECOND
+           + (t.ds_Tick - t0->ds_Tick);
+}
+
 int mdns_browse(int seconds, struct mdns_cradle *list, int max, ULONG breakSignals)
 {
     struct sockaddr_in me;
@@ -230,18 +240,26 @@ int mdns_browse(int seconds, struct mdns_cradle *list, int max, ULONG breakSigna
     }
     for (round = 0; round < seconds * 2; round++) {
         struct timeval wait;
+        struct DateStamp start;
         fd_set ready;
-        ULONG signals = breakSignals;
+        ULONG signals = 0;
         if (round % 2 == 0)
             sendQuestion(s, legacy);
+        /* Half a second a round, however much mDNS the LAN carries: every
+         * responder's chatter reaches this socket, so a wait that started
+         * again at each packet could go on for ever. */
+        DateStamp(&start);
         for (;;) {
             UBYTE msg[1500];
-            LONG n;
+            LONG n, left = TICKS_PER_SECOND / 2 - ticksSince(&start);
+            if (left <= 0)
+                break;
             FD_ZERO(&ready);
             FD_SET(s, &ready);
             wait.tv_sec = 0;
-            wait.tv_usec = 500000;
-            if (WaitSelect(s + 1, &ready, NULL, NULL, &wait, &signals) <= 0)
+            wait.tv_usec = left * (1000000 / TICKS_PER_SECOND);
+            signals = breakSignals;
+            if (WaitSelect(s + 1, &ready, NULL, NULL, &wait, &signals) <= 0 || (signals & breakSignals))
                 break;
             n = recvfrom(s, msg, sizeof msg, 0, NULL, NULL);
             if (n > 0)
