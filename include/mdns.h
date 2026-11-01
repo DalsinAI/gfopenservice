@@ -7,11 +7,18 @@
 
 #include <exec/types.h>
 
+/* A records kept for each Cradle's target: anyone on the LAN can answer for
+ * it, so every address that came is kept and the device tries each until one
+ * proves it holds the pairing key (device.c, lanConnect). */
+#define MDNS_ADDRESSES 8
+
 struct mdns_cradle {
     char instance[128];   /* "daletop._amicradle._tcp.local" */
     char target[128];     /* the SRV target, "daletop.local" */
     UWORD port;
-    ULONG address;        /* IPv4, host order; 0 when no A record came */
+    ULONG address;        /* IPv4, host order: the first A record, 0 when none came */
+    ULONG addresses[MDNS_ADDRESSES]; /* every A record for target, first come first, each once */
+    UWORD addressCount;
     char services[256];   /* svc=: "opentls.key/1,media.decode/1" */
     char fingerprint[72]; /* fp= */
     char name[64];        /* name= */
