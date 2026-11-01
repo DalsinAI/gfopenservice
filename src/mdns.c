@@ -1,6 +1,6 @@
 /*
  * openservice: find Cradles in the nursery with one mDNS question for
- * _amigachrome._tcp.local (see mdns.h).
+ * _amicradle._tcp.local (see mdns.h).
  * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #include <string.h>
@@ -30,7 +30,7 @@ static int sameName(const char *a, const char *b)
 }
 static int foundCount, foundMax;
 
-static const char serviceType[] = "_amigachrome._tcp.local";
+static const char serviceType[] = "_amicradle._tcp.local";
 
 static int putName(UBYTE *p, const char *name)
 {

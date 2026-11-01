@@ -253,7 +253,7 @@ static int send_headers(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
         p = e + 2;
     }
     if (!f->has_ua)
-        FIELD("user-agent", 10, "OpenWeb-Fetch/2", 15);
+        FIELD("user-agent", 10, "GFOpenWeb-Fetch/2", 17);
     if (f->flags & WFN_F_DECODE) {
         const char *ae = wfn_accept(w);
         FIELD("accept-encoding", 15, ae, strlen(ae));

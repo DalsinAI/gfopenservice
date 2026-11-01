@@ -23,7 +23,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
-#include "devices/openservice.h"
+#include "devices/gfopenservice.h"
 
 const char version[] __attribute__((used)) = "$VER: ToCDXL 0.1 (5.10.2026)";
 
@@ -120,7 +120,7 @@ int main(void)
     if (!(port = CreateMsgPort()) || !(io = (struct OSRequest *)CreateIORequest(port, sizeof *io)))
         goto done;
     if (OpenDevice((CONST_STRPTR)OPENSERVICE_NAME, 0, (struct IORequest *)io, 0)) {
-        printf("ToCDXL: cannot open %s (OpenUp's OpenService part installs it)\n", OPENSERVICE_NAME);
+        printf("ToCDXL: cannot open %s (GFOpenUp's GFOpenService part installs it)\n", OPENSERVICE_NAME);
         goto done;
     }
     opened = 1;

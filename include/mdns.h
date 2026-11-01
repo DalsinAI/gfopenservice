@@ -8,7 +8,7 @@
 #include <exec/types.h>
 
 struct mdns_cradle {
-    char instance[128];   /* "daletop._amigachrome._tcp.local" */
+    char instance[128];   /* "daletop._amicradle._tcp.local" */
     char target[128];     /* the SRV target, "daletop.local" */
     UWORD port;
     ULONG address;        /* IPv4, host order; 0 when no A record came */

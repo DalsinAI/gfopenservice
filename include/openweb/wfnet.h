@@ -9,7 +9,7 @@
  * with no writable globals: everything lives in the struct wfn that
  * wfn_new() makes. The machine plugs in through struct wfn_io: sockets,
  * TLS, time, memory, random bytes and the environment. src/wfnet_amiga.c
- * is bsdsocket.library and opentls.library; host/wfnet_posix.c is POSIX
+ * is bsdsocket.library and gfopentls.library; host/wfnet_posix.c is POSIX
  * sockets and OpenSSL, for the tests.
  *
  * Nothing runs in the background: every call moves every fetch on, for at

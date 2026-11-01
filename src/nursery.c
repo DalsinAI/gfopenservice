@@ -2,10 +2,10 @@
  * Nursery: lists the services this Amiga can hand work to.
  *
  * First the boards with the services block (AmigaChrome Team $DA15, any product): the
- * services card, CPU cores, FPU or TPU boards, virtual ones on AmigaChrome on
+ * services card, CPU cores, FPU or TPU boards, virtual ones on AmiCradle on
  * a PC or on our appliance, or real ones. Then any
  * Cradle on the LAN that offers services, found with one mDNS question for
- * _amigachrome._tcp.local. A Cradle lists what it offers in its TXT record:
+ * _amicradle._tcp.local. A Cradle lists what it offers in its TXT record:
  *   svc=opentls.key/1,media.decode/1
  *   fp=<pairing fingerprint>
  *   name=<what to call it>
@@ -93,7 +93,7 @@ static void listCradles(int all)
             continue;
         strncpy(label, c->name[0] ? c->name : c->instance, sizeof label - 1);
         label[sizeof label - 1] = 0;
-        if (!c->name[0] && (dot = strstr(label, "._amigachrome")))
+        if (!c->name[0] && (dot = strstr(label, "._amicradle")))
             *dot = 0;
         printf("Cradle:  %s", label);
         if (c->address)
@@ -181,9 +181,9 @@ static void keepLine(const char *file, const char *fingerprint, const char *line
 static void makeDirs(void)
 {
     BPTR lock;
-    if ((lock = CreateDir((CONST_STRPTR)"ENV:OpenService")))
+    if ((lock = CreateDir((CONST_STRPTR)"ENV:GFOpenService")))
         UnLock(lock);
-    if ((lock = CreateDir((CONST_STRPTR)"ENVARC:OpenService")))
+    if ((lock = CreateDir((CONST_STRPTR)"ENVARC:GFOpenService")))
         UnLock(lock);
 }
 
@@ -233,7 +233,7 @@ static int pair(const char *what)
         return RETURN_WARN;
     }
     if (!amigaId(hello + 4)) {
-        printf("Cannot keep this Amiga's identity in ENV:OpenService.\n");
+        printf("Cannot keep this Amiga's identity in ENV:GFOpenService.\n");
         return RETURN_FAIL;
     }
     s = socket(AF_INET, SOCK_STREAM, 0);

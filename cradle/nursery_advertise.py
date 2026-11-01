@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Advertise a Cradle's services to Amigas on the LAN (the nursery).
 
-Answers mDNS questions for _amigachrome._tcp.local with this Cradle's
+Answers mDNS questions for _amicradle._tcp.local with this Cradle's
 instance: PTR, SRV, TXT (svc=, fp=, name=) and A records. Standard library
 only; shares UDP 5353 with avahi and browsers on the same machine.
 
@@ -17,7 +17,7 @@ import time
 
 GROUP = "224.0.0.251"
 PORT = 5353
-SERVICE = "_amigachrome._tcp.local"
+SERVICE = "_amicradle._tcp.local"
 TYPE_A, TYPE_PTR, TYPE_TXT, TYPE_SRV, TYPE_ANY = 1, 12, 16, 33, 255
 CLASS_IN, CACHE_FLUSH = 1, 0x8000
 

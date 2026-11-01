@@ -1,7 +1,7 @@
 /*
  * wfnet on the Amiga (wfnet_amiga.h): the machine side of
- * include/openweb/wfnet.h with bsdsocket.library (any stack: OpenSocket,
- * Roadshow, AmiTCP) and opentls.library 1.x for TLS, ALPN included.
+ * include/openweb/wfnet.h with bsdsocket.library (any stack: GFOpenSocket,
+ * Roadshow, AmiTCP) and gfopentls.library 1.x for TLS, ALPN included.
  * Every library base lives in a struct wfna, none in globals, so any
  * number of tasks can each have their own.
  *
@@ -38,8 +38,8 @@
 #include <netinet/tcp.h>
 #include <netdb.h>
 #include <proto/bsdsocket.h>
-#include <libraries/opentls.h>
-#include <proto/opentls.h>
+#include <libraries/gfopentls.h>
+#include <proto/gfopentls.h>
 #include <datatypes/datatypes.h>
 #include <datatypes/datatypesclass.h>
 #include <proto/datatypes.h>
@@ -389,7 +389,7 @@ static void a_random(void *env, void *p, unsigned long n)
     unsigned char *b = p;
     if (tls_lib(e) && OT_Random(p, (LONG)n) == OTERR_OK)
         return;
-    while (n--) {                               /* no OpenTLS: good enough for masks and nonces, not keys */
+    while (n--) {                               /* no GFOpenTLS: good enough for masks and nonces, not keys */
         e->seed = e->seed * 1103515245UL + 12345UL + a_now(env);
         *b++ = (unsigned char)(e->seed >> 16);
     }

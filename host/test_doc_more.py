@@ -21,13 +21,13 @@ def call(op, data, ext="", maxw=600, room=0, page=0):
 
 PS = b"""%!PS-Adobe-3.0
 /Helvetica findfont 24 scalefont setfont
-72 700 moveto (OpenAmiga page one) show showpage
+72 700 moveto (GFOpenAmiga page one) show showpage
 72 700 moveto (Second page text) show showpage
 """
 EPS = b"""%!PS-Adobe-3.0 EPSF-3.0
 %%BoundingBox: 0 0 200 100
 /Helvetica findfont 20 scalefont setfont
-10 40 moveto (OpenAmiga page one) show
+10 40 moveto (GFOpenAmiga page one) show
 """
 
 
@@ -43,7 +43,7 @@ def epub(path):
                    '<dc:language>en</dc:language></metadata><manifest><item id="c1" href="c1.xhtml" '
                    'media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>')
         z.writestr("c1.xhtml", '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>c</title>'
-                   '</head><body><h1>OpenAmiga page one</h1><p>Hello from the Cradle.</p></body></html>')
+                   '</head><body><h1>GFOpenAmiga page one</h1><p>Hello from the Cradle.</p></body></html>')
 
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -54,10 +54,10 @@ with tempfile.TemporaryDirectory() as tmp:
         ("ps", PS, "", "PS  ", 2),
         ("eps", EPS, "", "EPS ", 1),
         ("epub", open(os.path.join(tmp, "b.epub"), "rb").read(), "", "EPUB", 1),
-        ("md", b"# OpenAmiga page one\n\nHello from the *Cradle*.\n", "md", "MD  ", 1),
+        ("md", b"# GFOpenAmiga page one\n\nHello from the *Cradle*.\n", "md", "MD  ", 1),
         ("csv", b"Name,Count\nOpenAmiga page one,1200\nCradle,1\n", "csv", "CSV ", 1),
-        ("html", b"<html><body><h1>OpenAmiga page one</h1></body></html>", "html", "HTML", 1),
-        ("txt", b"OpenAmiga page one\nPlain text.\n", "txt", "TXT ", 1),
+        ("html", b"<html><body><h1>GFOpenAmiga page one</h1></body></html>", "html", "HTML", 1),
+        ("txt", b"GFOpenAmiga page one\nPlain text.\n", "txt", "TXT ", 1),
     ]
     for name, data, ext, fmt, pages in cases:
         st, n, _, out = call(PROBE, data, ext, room=24)
@@ -70,7 +70,7 @@ with tempfile.TemporaryDirectory() as tmp:
         dark = sum(1 for i in range(1, len(out[1]), 4 * 7) if out[1][i] < 128)
         assert dark > 20, (name, dark)
         st, size, _, out = call(TEXT, data, ext, room=65536)
-        assert st == 0 and b"OpenAmiga page one" in out[1], (name, st, out[1][:80])
+        assert st == 0 and b"GFOpenAmiga page one" in out[1], (name, st, out[1][:80])
         print(f"{name}: {fmt} {n} page(s) at {ow}x{oh}, {dark} dark pixels sampled, text ok")
     assert call(PROBE, b"Name,Count\n1,2\n", "", room=24)[0] == -2      # CSV needs its hint
     print("text without a hint refused")

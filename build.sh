@@ -1,12 +1,12 @@
 #!/bin/sh
-# Builds openservice.device, Nursery, ServiceTest and ToCDXL for AmigaOS 3.x with the
+# Builds gfopenservice.device, Nursery, ServiceTest and ToCDXL for AmigaOS 3.x with the
 # os32-gcc16 compiler (GCC 16.2, libnix), OWFetch with the os32 stove (GCC 6.5),
 # and the host side's libraries: TLS keys, media decoding, documents and web fetches.
-#   OS32_GCC16  compiler root holding prefix/ (default ~/AmigaChrome/stoves/os32-gcc16)
+#   OS32_GCC16  compiler root holding prefix/ (default ~/AmiCradle/stoves/os32-gcc16)
 # MIT, Copyright (c) 2026 AmigaChrome Team.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
-P=${OS32_GCC16:-"$HOME/AmigaChrome/stoves/os32-gcc16"}/prefix
+P=${OS32_GCC16:-"$HOME/AmiCradle/stoves/os32-gcc16"}/prefix
 CC="$P/bin/m68k-amigaos-gcc"
 mkdir -p "$HERE/bin" "$HERE/obj"
 # The 68040, soft float (one binary for full and LC/EC 68040s): the specs
@@ -18,18 +18,18 @@ cd "$HERE"
 for f in start device mdns paired oscrypto osrandom; do
     "$CC" $SOFT -Os -fno-delete-null-pointer-checks -Wall -fomit-frame-pointer -Iinclude -c src/$f.c -o obj/$f.o
 done
-"$CC" -nostartfiles $SOFT -o bin/openservice.device obj/start.o obj/device.o obj/mdns.o obj/paired.o obj/oscrypto.o obj/osrandom.o \
-    -lamiga -Wl,-Map=obj/openservice.device.map
+"$CC" -nostartfiles $SOFT -o bin/gfopenservice.device obj/start.o obj/device.o obj/mdns.o obj/paired.o obj/oscrypto.o obj/osrandom.o \
+    -lamiga -Wl,-Map=obj/gfopenservice.device.map
 "$CC" $SOFT -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/Nursery src/nursery.c src/mdns.c src/paired.c src/oscrypto.c src/osrandom.c -lamiga
 "$CC" $SOFT -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ServiceTest src/servicetest.c -lamiga
 "$CC" $SOFT -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ToCDXL src/tocdxl.c -lamiga
 # OWFetch and its client (src/webfetch.c, for other programs to link), with
 # the os32 stove's GCC 6.5 and libnix.
-#   OS32  the stove holding prefix/ (default ~/AmigaChrome/stoves/os32)
-CC65=${OS32:-"$HOME/AmigaChrome/stoves/os32"}/prefix/bin/m68k-amigaos-gcc
+#   OS32  the stove holding prefix/ (default ~/AmiCradle/stoves/os32)
+CC65=${OS32:-"$HOME/AmiCradle/stoves/os32"}/prefix/bin/m68k-amigaos-gcc
 # The native transport (src/wfnet*.c: HTTP/1.1, HTTP/2, WebSocket, proxies,
-# auth) comes with it, over bsdsocket.library and opentls.library, whose
-# headers are OpenTLS's, and datatypes.library for compressed bodies, with
+# auth) comes with it, over bsdsocket.library and gfopentls.library, whose
+# headers are GFOpenTLS's, and datatypes.library for compressed bodies, with
 # stream.datatype's header from opendatatypes.
 #   OPENTLS  the openamigatls checkout (default: beside this one)
 #   ODT      the opendatatypes checkout (default: beside this one)
@@ -56,7 +56,7 @@ fi
 # doc.render/1: needs LibreOffice and poppler's tools at run time only.
 gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c host/hostrun.c -lpthread -ldl
 # The native transport's own code on Linux, for host/test_wfnet.py: POSIX
-# sockets, and OpenSSL and zlib standing in for OpenTLS and the datatypes.
+# sockets, and OpenSSL and zlib standing in for GFOpenTLS and the datatypes.
 if [ -f /usr/include/openssl/ssl.h ] && [ -f /usr/include/zlib.h ]; then
     gcc -std=c99 -O2 -Wall -Wextra -Werror -fPIC -shared -Iinclude -Isrc -o host/libwfnet.so host/wfnet_posix.c \
         src/wfnet.c src/wfnet_h2.c src/wfnet_hpack.c src/wfnet_auth.c -lssl -lcrypto -lz

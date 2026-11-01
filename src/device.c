@@ -1,5 +1,5 @@
 /*
- * openservice.device (devices/openservice.h).
+ * gfopenservice.device (devices/gfopenservice.h).
  *
  * One worker process does everything: it owns the services card's rings and
  * the LAN connections, so nothing here needs a lock beyond Forbid() around
@@ -32,7 +32,7 @@
 #include <sys/ioctl.h>
 #include <netinet/in.h>
 
-#include "devices/openservice.h"
+#include "devices/gfopenservice.h"
 #include "openservice.h"
 #include "mdns.h"
 #include "oscrypto.h"
@@ -43,8 +43,8 @@
 #endif
 
 const char DevName[] = OPENSERVICE_NAME;
-/* "Version DEVS:openservice.device" reads this; the ROMTag shows the rest. */
-const char DevVersion[] __attribute__((used)) = "$VER: openservice.device 1.1 (6.10.2026)";
+/* "Version DEVS:gfopenservice.device" reads this; the ROMTag shows the rest. */
+const char DevVersion[] __attribute__((used)) = "$VER: gfopenservice.device 1.1 (6.10.2026)";
 #define DevIdString (DevVersion + 6)
 #define DEV_VERSION 1
 #define DEV_REVISION 1
@@ -209,7 +209,7 @@ static int cradleCount;
 static ULONG browsedAt;              /* seconds, 0: never */
 
 static struct List waiting;          /* requests the card ring had no room for */
-/* With ENV:OpenService/Debug present, the worker logs to T:openservice.log. */
+/* With ENV:GFOpenService/Debug present, the worker logs to T:gfopenservice.log. */
 static BPTR debugLog;
 static void dbg(const char *what, ULONG a, ULONG b)
 {
@@ -1036,10 +1036,10 @@ static void workerMain(void)
     abortSignal = AllocSignal(-1);
     quitSignal = AllocSignal(-1);   /* not Ctrl-C: bsdsocket's WaitSelect takes that one for itself */
     {
-        BPTR probe = Lock((CONST_STRPTR)"ENV:OpenService/Debug", ACCESS_READ);
+        BPTR probe = Lock((CONST_STRPTR)"ENV:GFOpenService/Debug", ACCESS_READ);
         if (probe) {
             UnLock(probe);
-            debugLog = Open((CONST_STRPTR)"T:openservice.log", MODE_NEWFILE);
+            debugLog = Open((CONST_STRPTR)"T:gfopenservice.log", MODE_NEWFILE);
         }
     }
     SocketBase = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 4);

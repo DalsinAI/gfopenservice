@@ -1,5 +1,5 @@
 /*
- * ServiceTest: tries openservice.device end to end.
+ * ServiceTest: tries gfopenservice.device end to end.
  *   lists the services, opens echo/1 (or NAME), says where it runs, sends
  *   COUNT echoes and checks each answer, then times them.
  *
@@ -15,7 +15,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
-#include "devices/openservice.h"
+#include "devices/gfopenservice.h"
 
 const char version[] __attribute__((used)) = "$VER: ServiceTest 0.1 (5.10.2026)";
 

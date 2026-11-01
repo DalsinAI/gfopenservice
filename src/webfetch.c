@@ -1,5 +1,5 @@
 /*
- * webfetch: openweb.fetch through openservice.device, or through the
+ * webfetch: openweb.fetch through gfopenservice.device, or through the
  * native transport (src/wfnet_amiga.c) when no card or Cradle offers it
  * (include/openweb/webfetch.h). No C library beyond <string.h>, so any
  * program can link it.
@@ -91,11 +91,11 @@ static LONG call(struct wf_service *s, UWORD op, ULONG arg, const void *in0, ULO
 
 static LONG open_service(struct wf_service *s);
 
-/* ENV:OpenWeb/Fetch "native" asks for the native transport. */
+/* ENV:GFOpenWeb/Fetch "native" asks for the native transport. */
 static BOOL native_wanted(void)
 {
     char v[16];
-    return GetVar((CONST_STRPTR)"OpenWeb/Fetch", (STRPTR)v, sizeof v, 0) == 6 && (v[0] | 32) == 'n';
+    return GetVar((CONST_STRPTR)"GFOpenWeb/Fetch", (STRPTR)v, sizeof v, 0) == 6 && (v[0] | 32) == 'n';
 }
 
 static LONG open_native(struct wf_service *s)

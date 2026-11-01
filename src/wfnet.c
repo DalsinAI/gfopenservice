@@ -20,7 +20,7 @@
 #include "openweb/wfnet.h"
 #include "wfnet_int.h"
 
-#define USER_AGENT     "OpenWeb-Fetch/2"
+#define USER_AGENT     "GFOpenWeb-Fetch/2"
 #define TIMEOUT_DEF    30UL
 #define TIMEOUT_MAX    300UL
 #define MAX_WAIT       2000UL

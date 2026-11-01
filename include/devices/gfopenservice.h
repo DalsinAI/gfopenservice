@@ -1,9 +1,9 @@
 /*
- * openservice.device: hand work to a named service.
+ * gfopenservice.device: hand work to a named service.
  *
  * A program opens the device, asks for a service by name and version
  * ("opentls.key/1", "echo/1"), and sends it requests. The device takes each
- * request to the services card when the machine has one (AmigaChrome on a
+ * request to the services card when the machine has one (AmiCradle on a
  * PC, our appliance), or else to a paired Cradle on the LAN that offers the
  * service. When neither has it, OSCMD_OPEN fails with OSERR_NOSERVICE and the
  * program does the work itself: the device never does it on the 68k.
@@ -29,7 +29,7 @@
 
 #include <exec/io.h>
 
-#define OPENSERVICE_NAME "openservice.device"
+#define OPENSERVICE_NAME "gfopenservice.device"
 
 #define OSCMD_CALL  (CMD_NONSTD + 0)   /* os_Service, os_Op, os_Flags, os_Arg, buffers, os_Extra */
 #define OSCMD_OPEN  (CMD_NONSTD + 1)   /* os_Buf[0]: the name; os_Result: the handle */

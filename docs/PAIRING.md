@@ -29,9 +29,9 @@ The code is the first four bytes of SHA-256("openservice sas" ‖ A_pub ‖ C_pu
 ‖ na ‖ nc), big-endian, modulo 1,000,000. With both bytes 1 the key is
 HKDF-SHA256(X25519 secret, salt na ‖ nc, info "openservice pair v1", 32 bytes).
 
-The Amiga keeps `fp key name` in `ENV:OpenService/Paired` and
-`ENVARC:OpenService/Paired`, and its id (made at the first pairing) in
-`ENV:`/`ENVARC:OpenService/ID`. The Cradle keeps the Amiga's id and key in
+The Amiga keeps `fp key name` in `ENV:GFOpenService/Paired` and
+`ENVARC:GFOpenService/Paired`, and its id (made at the first pairing) in
+`ENV:`/`ENVARC:GFOpenService/ID`. The Cradle keeps the Amiga's id and key in
 `paired.json` (`$OPENSERVICE_STATE`, else `~/.config/openservice`, mode
 600). A line with a fingerprint alone still allows unsealed frames to a test
 Cradle started with `--allow-plain`; a real Cradle refuses them.
