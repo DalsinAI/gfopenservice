@@ -4,7 +4,9 @@ the file (an IFD at 0xFFFFFFFE, a central directory or local header at
 buffer inside the emulator. Builds media_tool.c with AddressSanitizer into a
 small driver, so it needs gcc with libasan and zlib's headers, not libavif.
 MIT, Copyright (c) 2026 AmigaChrome Team."""
+import glob
 import os
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -40,6 +42,10 @@ int main(int argc, char **argv)
 
     if (!strcmp(argv[1], "raw"))
         r = md_is_raw(d, n, "");
+    else if (!strcmp(argv[1], "pic")) {         /* through ImageMagick: 0 when read */
+        uint32_t flags = 0, w = 0, h = 0;
+        r = md_tool_picture(d, n, argc > 3 ? argv[3] : "", 0, &format, &flags, &w, &h, NULL);
+    }
     else
         r = (pic = md_zip_picture(d, n, argv[1], &format, &len)) != NULL;
     printf("%d\n", r);
@@ -85,11 +91,12 @@ with tempfile.TemporaryDirectory() as tmp:
                     "-I" + HERE, "-o", exe, src, os.path.join(HERE, "media_tool.c"),
                     os.path.join(HERE, "hostrun.c"), "-lz", "-lpthread"], check=True)
 
-    def run(mode, data):
+    def run(mode, data, *more):
         path = os.path.join(tmp, "in")
         open(path, "wb").write(data)
-        p = subprocess.run([exe, mode, path], capture_output=True, text=True,
-                           env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"))
+        p = subprocess.run([exe, mode, path, *more], capture_output=True, text=True,
+                           env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0",
+                                    OPENSERVICE_CACHE=os.path.join(tmp, "cache")))
         assert p.returncode == 0, (mode, data[:16].hex(), p.returncode, p.stderr[-2000:])
         return int(p.stdout)
 
@@ -115,3 +122,31 @@ with tempfile.TemporaryDirectory() as tmp:
     cd = central(b"a.png", loc, 0, len(page))
     assert run("cbz", body + cd + eocd(1, len(cd), len(body))) == 1
     print("media_tool: TIFF and ZIP offsets near 2^32 refused, good files still read")
+
+    # ImageMagick is named the coder, never left to choose one from the
+    # bytes or the name: a picture is still read, by its signature or (TGA)
+    # its hint, but SVG, MVG and PostScript are refused, however named.
+    if shutil.which("convert"):
+        def made(name, *args):
+            path = os.path.join(tmp, name)
+            subprocess.run(["convert", "-size", "8x8", "xc:#ff8000", *args, path], check=True)
+            return open(path, "rb").read()
+        png = made("p.png")
+        for name, hint in (("p.png", ""), ("p.tga", "tga"), ("p.pcx", ""), ("p.xpm", "xpm"), ("p.psd", ""),
+                           ("p.bmp", ""), ("p.tif", "")):
+            assert run("pic", made(name) if name != "p.png" else png, hint) == 0, name
+        assert run("pic", png, "mvg") == 0                       # a PNG named .mvg is read as PNG
+        fonts = sorted(glob.glob("/usr/share/fonts/**/*.ttf", recursive=True))
+        if fonts:
+            assert run("pic", open(fonts[0], "rb").read(), "ttf") == 0
+        secret = os.path.join(tmp, "secret.txt")
+        open(secret, "w").write("a host file\n")
+        svg = ('<?xml version="1.0"?>\n<!--' + "x" * 5000 + '-->\n<svg xmlns="http://www.w3.org/2000/svg" '
+               'xmlns:xlink="http://www.w3.org/1999/xlink" width="64" height="16"><image width="64" height="16" '
+               'xlink:href="text:' + secret + '"/></svg>\n').encode()
+        mvg = ('viewbox 0 0 64 16\nimage over 0,0 64,16 "text:' + secret + '"\n').encode()
+        ps = b"%!PS\n(" + secret.encode() + b") (r) file 100 string readstring pop print showpage\n"
+        for name, data, hint in (("SVG past librsvg's look", svg, ""), ("SVG", svg, "svg"), ("MVG", mvg, "mvg"),
+                                 ("MVG", mvg, ""), ("PostScript", ps, "eps"), ("PostScript", ps, "")):
+            assert run("pic", data, hint) != 0, (name, hint)
+        print("media_tool: ImageMagick told the format: pictures read, SVG, MVG and PostScript refused")

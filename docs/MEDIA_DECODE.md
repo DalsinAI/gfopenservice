@@ -9,9 +9,14 @@ QOI, EXR, HDR, TIFF, DDS, JPEG 2000...), any sound it reads (FLAC, Ogg
 Vorbis, Opus, MP3, AAC, ALAC, WMA, tracker modules through libopenmpt, and
 more) and any video it reads (H.264, HEVC, AV1, VP8/VP9, MPEG-4, MPEG-1/2,
 WMV, MJPEG, Theora); and `host/media_tool.c` for what host tools do better:
-camera RAW (LibRaw's `dcraw_emu`, else `dcraw`), every other picture
-ImageMagick reads (PSD, XCF, TGA, PCX, ...), MIDI (FluidSynth) and SID
-tunes (sidplayfp).
+camera RAW (LibRaw's `dcraw_emu`, else `dcraw`), the other raster
+pictures ImageMagick reads (PSD, XCF, TGA, PCX, ...), MIDI (FluidSynth) and
+SID tunes (sidplayfp). ImageMagick is always told the format
+(`PNG:in.png[0]`): known by the file's signature, or for TGA, PICT, WBMP
+and XBM, which have none, by the hint. It never picks a reader from the
+bytes or the name, so its readers that run scripts, read other files or
+fetch URLs (MVG, MSL, TEXT, SVG, PostScript, PDF, URL, ...) are never used
+for a guest's file; anything else is refused.
 
 The Amiga side is openamigaimage's datatypes (`heif.datatype`,
 `opensound.datatype`, `openvideo.datatype`, and `webm.datatype` for its
@@ -64,7 +69,8 @@ SVG and SVGZ (format `'SVG '`, always with alpha) are drawn by librsvg and
 cairo straight at the size wanted, not decoded and shrunk: a 16x16 icon at
 64x64 takes well under a millisecond once loaded. The host opens
 `librsvg-2.so.2` when first needed, so no development package is built
-against; without it, SVG goes to ImageMagick like any other picture.
+against; without it, SVG is refused (ImageMagick's SVG reader is not
+used: it can read other files).
 
 An SVG's own size (PROBE's result and aux) is the browser's: its `width` and
 `height` in pixels at 96 dots an inch, else its `viewBox`'s size (one of
