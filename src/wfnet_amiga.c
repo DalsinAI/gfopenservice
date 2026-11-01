@@ -8,7 +8,11 @@
  * Compressed bodies are undone by the datatypes (src/wfnet_dec.c):
  * datatypes.library is opened the first time a coded body or WFN_F_DECODE
  * comes, and stream.datatype's gzip.datatype and brotli.datatype do the
- * work. Without them the body comes as the server sent it.
+ * work. Without them the body comes as the server sent it. OS 3.2's own
+ * datatypes.library (47.3) makes no DTST_RAM object of a GID_DATA class
+ * (NewDTObjectA() fails, IoErr 115), so then the object is made from the
+ * class itself: its library's ObtainEngine() and NewObjectA(), with a
+ * DTA_Name, which 47.3's datatypesclass asks for (without one, IoErr 116).
  *
  * Names are resolved with gethostbyname(), which blocks the task for as
  * long as the stack takes; everything after that is non-blocking.
@@ -39,6 +43,7 @@
 #include <datatypes/datatypes.h>
 #include <datatypes/datatypesclass.h>
 #include <proto/datatypes.h>
+#include <proto/intuition.h>
 #include <datatypes/streamclass.h>
 
 #include "openweb/wfnet.h"
@@ -51,6 +56,7 @@ extern struct DosLibrary *DOSBase;
 #define SocketBase (e->socketbase)
 #define OpenTLSBase (e->tlsbase)
 #define DataTypesBase (e->dtbase)
+#define IntuitionBase (e->ibase)
 
 /* bsdsocket.library's error numbers (BSD's), whatever the C library calls its own. */
 #define B_EINTR       4
@@ -58,6 +64,7 @@ extern struct DosLibrary *DOSBase;
 #define B_EINPROGRESS 36
 
 #define PENDING 8               /* connections under way that have other addresses to try */
+#define DIRECT  48              /* objects made from the class itself, at most (3 per fetch's decoder) */
 #define ADDRS   4               /* and how many of those each keeps */
 
 struct wfna {
@@ -67,6 +74,9 @@ struct wfna {
     struct Library *dtbase;     /* datatypes.library, once a body is to be decoded */
     UBYTE dt_tried;             /* it was looked for */
     UBYTE dt_seen;              /* which datatypes are there (wfn_dec_accept) */
+    struct Library *ibase;      /* intuition.library, for objects made from the class itself */
+    struct Library *cls[2];     /* gzip.datatype and brotli.datatype, opened for that */
+    void *direct[DIRECT];       /* the objects made so: DisposeObject(), not DisposeDTObject() */
     ULONG sigs;                 /* the caller's signals to wait on as well */
     ULONG got;                  /* which of them came */
     ULONG seed;
@@ -409,6 +419,50 @@ void wfn_dt_release(void *env, void *p)
     a_release(env, p);
 }
 
+/* A class library's one call, -30 ObtainEngine(): its Class. A6 is saved
+ * by hand, as it may be the frame pointer. */
+static struct IClass *obtain_engine(struct Library *lib)
+{
+    register struct IClass *r __asm("d0");
+    register struct Library *a6 __asm("a0") = lib;
+    __asm volatile ("move.l %%a6,-(%%sp)\n\tmove.l %1,%%a6\n\tjsr -30(%%a6)\n\tmove.l (%%sp)+,%%a6"
+                    : "=r"(r), "+r"(a6) : : "d1", "a1", "cc", "memory");
+    return r;
+}
+
+/* The object made from the class itself, where datatypes.library makes
+ * none (OS 3.2's 47.3 for GID_DATA): the class library stays open until
+ * wfna_free(), and the object is remembered for wfn_dt_dispose(). */
+static void *direct_new(struct wfna *e, const char *name, struct TagItem *t)
+{
+    int k = name[0] == 'g' ? 0 : name[0] == 'b' ? 1 : -1, i;
+    struct IClass *cl;
+    struct TagItem named[2];
+    void *o;
+    char lib[32];
+    if (k < 0)
+        return NULL;
+    for (i = 0; i < DIRECT && e->direct[i]; i++)
+        ;
+    if (i == DIRECT)
+        return NULL;
+    if (!e->ibase && !(e->ibase = OpenLibrary((CONST_STRPTR)"intuition.library", 39)))
+        return NULL;
+    if (!e->cls[k]) {
+        strcpy(lib, "datatypes/");
+        strcat(lib, name);
+        strcat(lib, ".datatype");
+        if (!(e->cls[k] = OpenLibrary((CONST_STRPTR)lib, 47)))
+            return NULL;
+    }
+    named[0].ti_Tag = DTA_Name, named[0].ti_Data = (ULONG)name;
+    named[1].ti_Tag = TAG_MORE, named[1].ti_Data = (ULONG)t;
+    if (!(cl = obtain_engine(e->cls[k])) || !(o = NewObjectA(cl, NULL, named)))
+        return NULL;
+    e->direct[i] = o;
+    return o;
+}
+
 void *wfn_dt_new(void *env, const char *name, unsigned long wrapper)
 {
     struct wfna *e = env;
@@ -425,7 +479,12 @@ void *wfn_dt_new(void *env, const char *name, unsigned long wrapper)
     t[2].ti_Tag = DTA_GroupID, t[2].ti_Data = GID_DATA;
     t[3].ti_Tag = SDTA_Wrapper, t[3].ti_Data = wrapper;
     t[4].ti_Tag = TAG_DONE;
-    return NewDTObjectA(NULL, t);
+    {
+        void *o = NewDTObjectA(NULL, t);
+        if (o)
+            return o;
+    }
+    return direct_new(e, name, t);
 }
 
 int wfn_dt_feed(void *env, void *o, const unsigned char *p, unsigned long n)
@@ -466,6 +525,13 @@ void wfn_dt_end(void *env, void *o)
 void wfn_dt_dispose(void *env, void *o)
 {
     struct wfna *e = env;
+    int i;
+    for (i = 0; i < DIRECT; i++)
+        if (e->direct[i] == o) {
+            e->direct[i] = NULL;
+            DisposeObject(o);
+            return;
+        }
     DisposeDTObject(o);
 }
 
@@ -527,6 +593,12 @@ void wfna_free(struct wfna *e)
         OT_FreeContext(e->ctx);
     if (e->tlsbase)
         CloseLibrary(e->tlsbase);
+    if (e->cls[0])
+        CloseLibrary(e->cls[0]);
+    if (e->cls[1])
+        CloseLibrary(e->cls[1]);
+    if (e->ibase)
+        CloseLibrary(e->ibase);
     if (e->dtbase)
         CloseLibrary(e->dtbase);
     CloseLibrary(e->socketbase);
