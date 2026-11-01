@@ -50,10 +50,10 @@ int md_is_raw(const uint8_t *d, uint32_t n, const char *hint)
         uint32_t ifd = le ? d[4] | d[5] << 8 | d[6] << 16 | (uint32_t)d[7] << 24
                           : (uint32_t)d[4] << 24 | d[5] << 16 | d[6] << 8 | d[7];
         uint32_t count;
-        if (ifd + 2 > n)
+        if (ifd > n || n - ifd < 2)                 /* not ifd + 2 > n: that wraps at 0xFFFFFFFE */
             return 0;
         count = le ? d[ifd] | d[ifd + 1] << 8 : d[ifd] << 8 | d[ifd + 1];
-        for (i = 0; i < count && ifd + 2 + i * 12 + 2 <= n; i++) {
+        for (i = 0; i < count && i * 12 + 2 <= n - ifd - 2; i++) {
             const uint8_t *e = d + ifd + 2 + i * 12;
             if ((le ? e[0] | e[1] << 8 : e[0] << 8 | e[1]) == 0xC612)
                 return 1;
@@ -102,12 +102,13 @@ static int zip_find(const uint8_t *d, uint32_t n, const char *want, uint32_t *lo
     cd = le32(d + eocd + 16);
     for (k = 0; k < entries; k++) {
         uint32_t nl, el, cl;
-        if (cd + 46 > n || le32(d + cd) != 0x02014b50)
+        /* cd comes from the file: cd + 46 > n wraps near 2^32, so n - cd. */
+        if (cd > n || n - cd < 46 || le32(d + cd) != 0x02014b50)
             return -1;
         nl = le16(d + cd + 28);
         el = le16(d + cd + 30);
         cl = le16(d + cd + 32);
-        if (cd + 46 + nl > n)
+        if (nl > n - cd - 46 || el + cl > n - cd - 46 - nl)
             return -1;
         if (want ? nl == strlen(want) && !memcmp(d + cd + 46, want, nl)
                  : picture_name(d + cd + 46, nl)
@@ -130,16 +131,21 @@ static int zip_find(const uint8_t *d, uint32_t n, const char *want, uint32_t *lo
 static uint8_t *zip_member(const uint8_t *d, uint32_t n, uint32_t local, uint32_t *len)
 {
     uint32_t method, csize, usize, start;
+    uint64_t at;
     uint8_t *out;
     z_stream z;
 
-    if (local + 30 > n || le32(d + local) != 0x04034b50)
+    /* local comes from the file: local + 30 > n wraps near 2^32, so n - local. */
+    if (local > n || n - local < 30 || le32(d + local) != 0x04034b50)
         return NULL;
     method = le16(d + local + 8);
     csize = le32(d + local + 18);
     usize = le32(d + local + 22);
-    start = local + 30 + le16(d + local + 26) + le16(d + local + 28);
-    if ((le16(d + local + 6) & 8) || start > n || csize > n - start || usize > (1u << 28) || !usize)
+    at = (uint64_t)local + 30 + le16(d + local + 26) + le16(d + local + 28);
+    if (at > n)
+        return NULL;
+    start = (uint32_t)at;
+    if ((le16(d + local + 6) & 8) || csize > n - start || usize > (1u << 28) || !usize)
         return NULL;                                /* sizes after the data: not written by these programs */
     if (!(out = malloc(usize)))
         return NULL;
