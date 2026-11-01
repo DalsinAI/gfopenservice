@@ -119,6 +119,23 @@ static void takeTxt(struct mdns_cradle *c, const UBYTE *p, int length)
     }
 }
 
+/* Every A record for c's target is kept, not the last to come: any host on
+ * the LAN can answer for the name, so the device tries them all and uses the
+ * one that proves the pairing key. */
+static void addAddress(struct mdns_cradle *c, ULONG a)
+{
+    int i;
+    if (!a)
+        return;
+    for (i = 0; i < c->addressCount; i++)
+        if (c->addresses[i] == a)
+            return;
+    if (c->addressCount == MDNS_ADDRESSES)
+        return;
+    c->addresses[c->addressCount++] = a;
+    c->address = c->addresses[0];
+}
+
 static void takeAnswer(const UBYTE *msg, int length)
 {
     int at = 12, i, records;
@@ -166,10 +183,11 @@ static void takeAnswer(const UBYTE *msg, int length)
                 } else if (type == 16 && (c = cradleFor(name, 0))) {
                     takeTxt(c, msg + rdata, rdlength);
                 } else if (type == 1 && rdlength == 4) {
+                    ULONG a = (ULONG)msg[rdata] << 24 | (ULONG)msg[rdata + 1] << 16 | (ULONG)msg[rdata + 2] << 8 | msg[rdata + 3];
                     int k;
                     for (k = 0; k < foundCount; k++)
                         if (sameName(found[k].target, name))
-                            found[k].address = (ULONG)msg[rdata] << 24 | (ULONG)msg[rdata + 1] << 16 | (ULONG)msg[rdata + 2] << 8 | msg[rdata + 3];
+                            addAddress(&found[k], a);
                 }
             }
         }
