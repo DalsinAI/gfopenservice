@@ -618,6 +618,17 @@ static int lanFor(const char *name)
             return -1;
         UnLock(paired);
     }
+    /* A paired Cradle offering name that is connected already: use it with
+     * no question on the LAN, so an OPEN waits on a browse only when no
+     * connection serves the name and the last browse is old. */
+    for (i = 0; i < cradleCount; i++) {
+        struct mdns_cradle *cr = &cradles[i];
+        if (!cr->address || !mdns_offers(cr, name) || !openservice_paired(cr->fingerprint))
+            continue;
+        for (c = 0; c < MAX_CONNS; c++)
+            if (conns[c].socket >= 0 && conns[c].address == cr->address && conns[c].port == cr->port)
+                return c;
+    }
     DateStamp(&ds);
     now = (ULONG)ds.ds_Days * 86400 + ds.ds_Minute * 60 + ds.ds_Tick / TICKS_PER_SECOND;
     if (!browsedAt || now - browsedAt > 30) {
