@@ -282,6 +282,48 @@ static int parse_pnm(const uint8_t *d, size_t n, uint32_t *flags, uint32_t *widt
 
 /* ---- pictures ------------------------------------------------------------ */
 
+/* ImageMagick is told the coder ("PNG:in.png[0]"), so it never picks one
+ * from the guest's bytes or name itself. Coders that run scripts, read
+ * other files or fetch URLs (MVG, MSL, TEXT, SVG, PS, PDF and EPS through
+ * Ghostscript, URL, ...) are then out of a guest file's reach whatever it
+ * holds. A format with a signature is known by it; the few without one
+ * (TGA, PICT, WBMP, XBM) only by the hint. */
+const char *md_magick_coder(const uint8_t *d, uint32_t n, const char *hint)
+{
+    static const struct { const char *coder; uint8_t off, len; const char *magic; } sig[] = {
+        { "PNG", 0, 8, "\x89PNG\r\n\x1a\n" }, { "MNG", 0, 8, "\x8aMNG\r\n\x1a\n" },
+        { "JNG", 0, 8, "\x8bJNG\r\n\x1a\n" }, { "JPEG", 0, 3, "\xff\xd8\xff" },
+        { "GIF", 0, 4, "GIF8" }, { "BMP", 0, 2, "BM" }, { "TIFF", 0, 4, "II*\0" }, { "TIFF", 0, 4, "MM\0*" },
+        { "PSD", 0, 4, "8BPS" }, { "WEBP", 8, 4, "WEBP" }, { "ICO", 0, 4, "\0\0\1\0" },
+        { "CUR", 0, 4, "\0\0\2\0" }, { "XPM", 0, 9, "/* XPM */" }, { "SGI", 0, 2, "\x01\xda" },
+        { "SUN", 0, 4, "\x59\xa6\x6a\x95" }, { "XCF", 0, 8, "gimp xcf" }, { "DDS", 0, 4, "DDS " },
+        { "EXR", 0, 4, "\x76\x2f\x31\x01" }, { "HDR", 0, 10, "#?RADIANCE" }, { "HDR", 0, 6, "#?RGBE" },
+        { "JP2", 0, 12, "\0\0\0\x0cjP  \r\n\x87\n" }, { "J2K", 0, 4, "\xff\x4f\xff\x51" },
+        { "FITS", 0, 9, "SIMPLE  =" }, { "DPX", 0, 4, "SDPX" }, { "DPX", 0, 4, "XPDS" },
+        { "CIN", 0, 4, "\x80\x2a\x5f\xd7" }, { "DCX", 0, 4, "\xb1\x68\xde\x3a" },
+        { "TTF", 0, 4, "\0\1\0\0" }, { "TTF", 0, 4, "true" }, { "OTF", 0, 4, "OTTO" },
+    };
+    static const char *const by_hint[][2] = {
+        { "tga", "TGA" }, { "icb", "TGA" }, { "vda", "TGA" }, { "vst", "TGA" }, { "pict", "PICT" },
+        { "pct", "PICT" }, { "wbmp", "WBMP" }, { "xbm", "XBM" },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof sig / sizeof *sig; i++)
+        if (n >= (uint32_t)sig[i].off + sig[i].len && !memcmp(d + sig[i].off, sig[i].magic, sig[i].len)
+            && (strcmp(sig[i].coder, "WEBP") || !memcmp(d, "RIFF", 4))
+            && (sig[i].magic[0] || (n >= 6 && (d[4] || d[5]))))  /* ICO, CUR: an image count (a TGA has 0 there) */
+            return sig[i].coder;
+    if (n >= 3 && d[0] == 'P' && d[1] >= '1' && d[1] <= '7' && (d[2] == ' ' || d[2] == '\n' || d[2] == '\r' || d[2] == '\t'))
+        return d[1] == '7' ? "PAM" : "PNM";
+    if (n >= 128 && d[0] == 0x0a && d[1] <= 5 && d[1] != 1 && d[2] == 1)     /* ZSoft PCX: version, RLE */
+        return "PCX";
+    for (i = 0; i < sizeof by_hint / sizeof *by_hint; i++)
+        if (!strcmp(hint, by_hint[i][0]))
+            return by_hint[i][1];
+    return NULL;
+}
+
 /* The file converted to PNM/PAM in the cache (path into out); 0 on success. */
 static int convert(const uint8_t *d, uint32_t n, const char *hint, int raw, char *out, size_t room)
 {
@@ -313,8 +355,11 @@ static int convert(const uint8_t *d, uint32_t n, const char *hint, int raw, char
             }
         } else {
             char *im[] = { "convert", arg, "-depth", "8", dst, NULL };
-            snprintf(arg, sizeof arg, "%s[0]", src);
-            rc = hr_run(im, -1);
+            const char *coder = md_magick_coder(d, n, hint);
+            if (coder) {
+                snprintf(arg, sizeof arg, "%s:%s[0]", coder, src);
+                rc = hr_run(im, -1);
+            }
         }
         if (rc == 0 && (stat(dst, &sb) != 0 || sb.st_size == 0 || hr_move(dst, out) != 0))
             rc = -1;
