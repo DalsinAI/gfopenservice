@@ -10,8 +10,8 @@
  *   NATIVE: this Amiga's own TCP/IP and OpenTLS, even with a card there.
  *   HEADER: one or more "Name: value", sent as they are (Cookie, Accept...).
  *   HEAD: the head only. FROM: a file sent as the body (POST unless METHOD).
- *   RAW: the body as the server sent it (otherwise gzip is undone; natively,
- *        with no decoder there yet, it is asked for uncoded).
+ *   RAW: the body as the server sent it (otherwise gzip, deflate and br are
+ *        undone; natively by the datatypes, when they are installed).
  *   QUIET: no head printed. INFO: the TLS summary too.
  * Ctrl-C cancels. Returns 0 for any HTTP answer below 400, 5 for 400 and
  * above, 10 when the fetch failed, 20 when it could not start.
@@ -36,8 +36,6 @@ unsigned long __stack = 65536;
 #define PIECE (256UL << 10)
 #define HEAD_ROOM (72UL << 10)
 #define MAX_HEADERS 32
-
-static const char identity[] = "Accept-Encoding: identity";
 
 static BOOL broken(void)
 {
@@ -76,16 +74,6 @@ static void info_value(const struct wf_head *h, const char *key, char *out, ULON
     }
 }
 
-/* Whether a "Name: value" line is the named header (name in lower case). */
-static BOOL has_name(const char *line, const char *name)
-{
-    ULONG i;
-    for (i = 0; name[i]; i++)
-        if ((line[i] >= 'A' && line[i] <= 'Z' ? line[i] + 32 : line[i]) != name[i])
-            return FALSE;
-    return line[i] == ':';
-}
-
 int main(void)
 {
     enum { URL, TO, HEAD, HEADER, METHOD, FROM, TIMEOUT, RAW, QUIET, INFO, NATIVE, NARGS };
@@ -114,7 +102,7 @@ int main(void)
             headers[count] = ((const char **)args[HEADER])[count];
             count++;
         }
-    request_room = strlen(method) + strlen((const char *)args[URL]) + sizeof identity + 8;
+    request_room = strlen(method) + strlen((const char *)args[URL]) + 8;
     for (status = 0; status < count; status++)
         request_room += strlen(headers[status]) + 1;
     if (!(request = AllocVec(request_room, MEMF_ANY)) || !(head = AllocVec(HEAD_ROOM, MEMF_ANY))
@@ -142,14 +130,6 @@ int main(void)
         printf("OWFetch: no services card or paired Cradle offers %s, and no TCP/IP stack is running (%ld)\n",
                WF_SERVICE_NAME, (long)status);
         goto done;
-    }
-    /* Natively there is no decoder yet: ask for the body uncoded, unless a HEADER names a coding. */
-    if (s.where == WF_WHERE_NATIVE && (flags & WF_DECODE)) {
-        flags &= ~WF_DECODE;
-        for (status = 0; status < count && !has_name(headers[status], "accept-encoding"); status++)
-            ;
-        if (status == count)
-            headers[count++] = identity;
     }
     wf_request(request, request_room, method, (const char *)args[URL], headers, count);
     if (args[INFO])

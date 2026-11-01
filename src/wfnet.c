@@ -114,6 +114,13 @@ static int passed(unsigned long now_ms, unsigned long when)
     return (long)(now_ms - when) >= 0;
 }
 
+/* Accept-Encoding with WFN_F_DECODE: what the decoders undo, or identity. */
+const char *wfn_accept(struct wfn *w)
+{
+    const char *a = w->io.dec_accept ? w->io.dec_accept(w->io.env) : NULL;
+    return a && *a ? a : "identity";
+}
+
 void wfn_info(struct wfn_fetch *f, const char *key, const char *value)
 {
     unsigned long kl = strlen(key), vl = strlen(value);
@@ -428,6 +435,7 @@ static void reset_answer(struct wfn *w, struct wfn_fetch *f)
         f->dec = NULL;
     }
     f->raw.len = f->raw.at = 0;
+    f->no_decoder = 0;
 }
 
 void wfn_fail(struct wfn *w, struct wfn_fetch *f, unsigned long error, const char *why)
@@ -687,14 +695,12 @@ int wfn_set_head(struct wfn *w, struct wfn_fetch *f, unsigned long status, unsig
     }
     /* Content-Encoding: through the decoder hook when there is one. */
     if ((f->flags & WFN_F_DECODE) && (v = wfn_hdr(lines, len, "content-encoding", &vl, NULL)) != NULL && vl
-        && !wfn_ieq(v, vl, "identity") && !cpy(coding, sizeof coding, v, vl)) {
-        if (w->io.dec_new && (f->dec = w->io.dec_new(w->io.env, coding)) != NULL)
+        && !wfn_ieq(v, vl, "identity")) {
+        if (!cpy(coding, sizeof coding, v, vl) && w->io.dec_new && (f->dec = w->io.dec_new(w->io.env, coding)) != NULL)
             drop_coding = 1;
         else
             f->no_decoder = 1;
     }
-    if ((f->flags & WFN_F_DECODE) && !f->dec)
-        f->no_decoder = 1;
     if (!(f->htext = zalloc(w, sl + len + 2)))
         return -1;
     memcpy(f->htext, sline, sl);
@@ -748,6 +754,8 @@ int wfn_set_head(struct wfn *w, struct wfn_fetch *f, unsigned long status, unsig
         wfn_info(f, "auth", f->auth_tried && f->pauth_tried ? "both" : f->auth_tried ? "server" : "proxy");
     if (f->no_decoder)
         wfn_info(f, "decode", "datatypes");
+    else if (f->dec)
+        wfn_info(f, "decode", w->io.dec_name ? w->io.dec_name(w->io.env, f->dec) : "yes");
     if (f->reused)
         wfn_info(f, "reused", "yes");
     f->head_ready = 1;
@@ -802,7 +810,7 @@ static int write_request(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
     else
         bad |= outs(w, c, "Connection: keep-alive\r\n");
     if (f->flags & WFN_F_DECODE)
-        bad |= outs(w, c, "Accept-Encoding: gzip, deflate, br\r\n");
+        bad |= outs(w, c, "Accept-Encoding: ") | outs(w, c, wfn_accept(w)) | outs(w, c, "\r\n");
     if (f->auth)
         bad |= outs(w, c, "Authorization: ") | outs(w, c, f->auth) | outs(w, c, "\r\n");
     if (f->forward && f->pauth)
@@ -1491,8 +1499,24 @@ static int assign(struct wfn *w, struct wfn_fetch *f)
         if (pending || busy >= KEEP_PER_HOST)
             return 0;
     }
-    if (w->nconn >= WFN_MAX_FETCHES + KEEP_MAX)
-        return 0;
+    if (w->nconn >= WFN_MAX_CONNS) {
+        /* No socket left: the oldest kept one goes, if one is idle; else
+         * the fetch waits for a connection to end. */
+        struct wfn_conn *oldest = NULL;
+        struct wfn_fetch *g;
+        for (c = w->conns; c; c = c->next) {
+            if (c->state != C_READY || c->owner || wfn_h2_busy(c)
+                || (oldest && (long)(c->idle_at - oldest->idle_at) >= 0))
+                continue;
+            for (g = w->fetches; g && g->conn != c; g = g->next)
+                ;
+            if (!g)
+                oldest = c;
+        }
+        if (!oldest)
+            return 0;
+        conn_free(w, oldest);           /* closed now: no fetch is on it */
+    }
     if (!(c = zalloc(w, sizeof *c))) {
         wfn_fail(w, f, WFN_E_HOST, "no memory");
         return 1;
@@ -1575,8 +1599,8 @@ static void progress(struct wfn *w)
 /* Waits at most ms for a socket to be ready: WFN_BROKEN when told to stop. */
 static int block(struct wfn *w, unsigned long ms)
 {
-    long socks[WFN_MAX_FETCHES + KEEP_MAX];
-    unsigned char want[WFN_MAX_FETCHES + KEEP_MAX], ready[WFN_MAX_FETCHES + KEEP_MAX];
+    long socks[WFN_MAX_CONNS];
+    unsigned char want[WFN_MAX_CONNS], ready[WFN_MAX_CONNS];
     struct wfn_conn *c;
     struct wfn_fetch *f;
     unsigned long t = now(w);
@@ -1609,10 +1633,25 @@ static int block(struct wfn *w, unsigned long ms)
     return w->io.wait(w->io.env, socks, want, ready, n, ms);
 }
 
-/* Runs until done(f) or the wait is over. */
+/* What the caller could take now, summed over the fetches: when progress()
+ * changes it, a caller is waiting for those bytes, not for a socket. */
+static unsigned long takeable(struct wfn *w)
+{
+    struct wfn_fetch *f;
+    unsigned long n = 0;
+    for (f = w->fetches; f; f = f->next)
+        n += f->ring.len + f->head_ready + f->body_done + (f->error ? 1 : 0);
+    return n;
+}
+
+/* Runs until done(f) or the wait is over. What is already there is taken
+ * without moving every other fetch on first: a task asking each of many
+ * fetches in turn (a browser) would otherwise move all of them on for each. */
 static void wait_for(struct wfn *w, struct wfn_fetch *f, unsigned long wait, int (*done)(const struct wfn_fetch *))
 {
     unsigned long start = now(w);
+    if (done(f))
+        return;
     if (wait > MAX_WAIT)
         wait = MAX_WAIT;
     for (;;) {
@@ -1655,8 +1694,12 @@ static int ws_room(const struct wfn_fetch *f)
  * moves them on again. For a task with many fetches: pump, then ask each with a wait of 0. */
 void wfn_pump(struct wfn *w, unsigned long ms)
 {
+    unsigned long before = takeable(w);
     progress(w);
-    if (ms) {
+    /* Bytes, heads or ends that came in this round are for the caller now:
+     * the sockets they came from are drained, so waiting on them would hold
+     * those bytes until the next packet (up to ms). */
+    if (ms && takeable(w) == before) {
         block(w, ms > MAX_WAIT ? MAX_WAIT : ms);
         progress(w);
     }

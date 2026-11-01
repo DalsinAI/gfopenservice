@@ -4,7 +4,10 @@
  * default trust store, which SSL_CERT_FILE can name) and zlib standing in
  * for the datatypes' decoders (gzip and deflate, when asked for). The
  * protocol code is the Amiga's own, src/wfnet*.c, built unchanged.
- * Built into host/libwfnet.so by build.sh.
+ * Built into host/libwfnet.so by build.sh. With WFNP_DATATYPES the
+ * decoders are the Amiga's own instead (src/wfnet_dec.c), over
+ * stream.datatype's portable core (host/wfnet_dt.c), as host/test_wfnet.py
+ * builds it when opendatatypes is there.
  * MIT, Copyright (c) 2026 AmigaChrome Team.
  * SPDX-License-Identifier: MIT
  */
@@ -30,12 +33,16 @@
 #include <zlib.h>
 
 #include "openweb/wfnet.h"
+#ifdef WFNP_DATATYPES
+#include "wfnet_dec.h"
+#endif
 
 #define PENDING 64
 
 struct env {
     SSL_CTX *ctx;
     int decoders;
+    unsigned char dt_seen;
     struct {                        /* connections under way, with the addresses still to try */
         int fd;
         struct addrinfo *res, *next;
@@ -415,7 +422,24 @@ static void p_dec_free(void *env, void *dec)
     free(dec);
 }
 
-/* For the tests (ctypes): a struct wfn with this machine under it. decoders: zlib for WFN_F_DECODE. */
+static const char *p_dec_accept(void *env)
+{
+#ifdef WFNP_DATATYPES
+    return ((struct env *)env)->decoders ? wfn_dec_accept(env, &((struct env *)env)->dt_seen) : NULL;
+#else
+    return ((struct env *)env)->decoders ? "gzip, deflate" : NULL;
+#endif
+}
+
+static const char *p_dec_name(void *env, void *dec)
+{
+    (void)env;
+    (void)dec;
+    return "zlib";
+}
+
+/* For the tests (ctypes): a struct wfn with this machine under it. decoders: zlib (or the datatypes'
+ * glue) for WFN_F_DECODE. */
 struct wfnp {
     struct wfn *w;
     struct env *e;
@@ -460,6 +484,16 @@ struct wfnp *wfnp_new(unsigned long window, int decoders)
     io.dec_new = p_dec_new;
     io.dec_run = p_dec_run;
     io.dec_free = p_dec_free;
+    io.dec_name = p_dec_name;
+#ifdef WFNP_DATATYPES
+    if (decoders) {
+        io.dec_new = wfn_dec_new;
+        io.dec_run = wfn_dec_run;
+        io.dec_free = wfn_dec_free;
+        io.dec_name = wfn_dec_name;
+    }
+#endif
+    io.dec_accept = p_dec_accept;
     p->e = e;
     if (!(p->w = wfn_new(&io, window))) {
         SSL_CTX_free(e->ctx);

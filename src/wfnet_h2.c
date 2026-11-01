@@ -254,8 +254,10 @@ static int send_headers(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
     }
     if (!f->has_ua)
         FIELD("user-agent", 10, "OpenWeb-Fetch/2", 15);
-    if (f->flags & WFN_F_DECODE)
-        FIELD("accept-encoding", 15, "gzip, deflate, br", 17);
+    if (f->flags & WFN_F_DECODE) {
+        const char *ae = wfn_accept(w);
+        FIELD("accept-encoding", 15, ae, strlen(ae));
+    }
     if (f->auth)
         FIELD("authorization", 13, f->auth, strlen(f->auth));
     if ((f->flags & WFN_F_BODY) && f->body_length != WFN_LENGTH_UNKNOWN) {
@@ -466,7 +468,10 @@ static int handle(struct wfn *w, struct wfn_conn *c, unsigned type, unsigned fla
                 }
                 f->left -= dl;
             }
-            took = wfn_deliver(w, f, d, dl);
+            /* Behind bytes already stashed, a frame is stashed too: the body
+             * stays in order (the decoder fills the ring and stashes long
+             * before the window is used up). */
+            took = f->raw.len ? 0 : wfn_deliver(w, f, d, dl);
             if (f->body_done && f->error)
                 return 1;                           /* the decoder failed */
             if (f->dec || f->discard)

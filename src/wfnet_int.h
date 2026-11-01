@@ -9,7 +9,11 @@
 
 typedef unsigned int wu32;      /* 32 bits on the 68k and on Linux */
 
-#define WFN_MAX_FETCHES 64
+#define WFN_MAX_FETCHES 128     /* a browser's page can have more than 64 loads under way */
+/* Sockets at once: the Amiga's fd_set holds 64 (FD_SETSIZE in the NDK's
+ * sys/socket.h), and wfnet_amiga.c keeps up to 8 more while it tries a
+ * name's other addresses. A fetch beyond this waits for a socket. */
+#define WFN_MAX_CONNS   56
 #define WFN_MAX_HEAD    (64UL << 10)        /* a response head; the request text */
 #define WFN_FRAME       16384UL             /* HTTP/2's frame size, ours and the default */
 #define WFN_IN_ROOM     (WFN_FRAME + 9 + 1015)
@@ -129,6 +133,7 @@ unsigned long wfn_up_take(struct wfn *w, struct wfn_fetch *f, unsigned char *out
 int wfn_flush(struct wfn *w, struct wfn_conn *c);
 int wfn_up_done(const struct wfn_fetch *f);
 void wfn_info(struct wfn_fetch *f, const char *key, const char *value);
+const char *wfn_accept(struct wfn *w);
 
 /* src/wfnet_h2.c */
 int wfn_h2_start(struct wfn *w, struct wfn_conn *c);
