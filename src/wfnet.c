@@ -870,6 +870,25 @@ static unsigned long line(const struct wfn_conn *c)
 
 static void ws_opened(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f);
 
+/* Room in hbuf for one more byte of the head: 2 KB first (most heads fit),
+ * doubled as needed up to WFN_MAX_HEAD, so a fetch doesn't take (and the
+ * Amiga clear) 64 KB for every answer. 0, or -1 with no memory. */
+static int hbuf_grow(struct wfn *w, struct wfn_fetch *f)
+{
+    unsigned long room = f->hbuf_room ? f->hbuf_room * 2 : 2048;
+    char *p;
+    if (room > WFN_MAX_HEAD)
+        room = WFN_MAX_HEAD;
+    if (!(p = zalloc(w, room)))
+        return -1;
+    if (f->hbuf_len)
+        memcpy(p, f->hbuf, f->hbuf_len);
+    zfree(w, f->hbuf);
+    f->hbuf = p;
+    f->hbuf_room = room;
+    return 0;
+}
+
 /* The head is in hbuf: 0, 1 when it was a 1xx to skip, -1 when the fetch failed. */
 static int h1_head(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
 {
@@ -1295,12 +1314,12 @@ static int h1_step(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
             /* The head, a byte at a time into hbuf, to its empty line. */
             while (c->in_at < c->in_len) {
                 char ch = (char)c->in[c->in_at++];
-                if (!f->hbuf && !(f->hbuf = zalloc(w, WFN_MAX_HEAD))) {
-                    wfn_fail(w, f, WFN_E_HOST, "no memory");
-                    return 1;
-                }
                 if (f->hbuf_len >= WFN_MAX_HEAD) {
                     wfn_fail(w, f, WFN_E_PROTOCOL, "the answer's head was over 64 KB");
+                    return 1;
+                }
+                if (f->hbuf_len >= f->hbuf_room && hbuf_grow(w, f)) {
+                    wfn_fail(w, f, WFN_E_HOST, "no memory");
                     return 1;
                 }
                 f->hbuf[f->hbuf_len++] = ch;

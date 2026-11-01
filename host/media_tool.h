@@ -1,7 +1,8 @@
 /*
  * media.decode/1, the half that runs host tools (media_tool.c): camera RAW
- * through LibRaw's dcraw_emu, anything else ImageMagick reads (XCF, TGA,
- * EPS, ...), MIDI through FluidSynth and SID tunes through sidplayfp.
+ * through LibRaw's dcraw_emu, the raster formats ImageMagick reads (XCF,
+ * TGA, PCX, ...; md_magick_coder), MIDI through FluidSynth and SID tunes
+ * through sidplayfp.
  * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #ifndef MEDIA_TOOL_H
@@ -13,6 +14,10 @@
 void md_hint(uint32_t hint, char out[8]);
 /* 1 when the hint or the bytes say camera RAW. */
 int md_is_raw(const uint8_t *d, uint32_t n, const char *hint);
+/* The ImageMagick coder named for these bytes ("PNG"), from their
+ * signature, or from the hint for the few formats without one; NULL when
+ * none, and ImageMagick isn't run. */
+const char *md_magick_coder(const uint8_t *d, uint32_t n, const char *hint);
 /* A picture through dcraw_emu (raw) or ImageMagick, full size, as ARGB
  * (malloc'd); the result is kept in the cache, so a PROBE then a DECODE
  * converts once. */
