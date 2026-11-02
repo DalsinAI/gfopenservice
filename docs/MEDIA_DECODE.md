@@ -18,7 +18,7 @@ bytes or the name, so its readers that run scripts, read other files or
 fetch URLs (MVG, MSL, TEXT, SVG, PostScript, PDF, URL, ...) are never used
 for a guest's file; anything else is refused.
 
-The Amiga side is openamigaimage's datatypes (`heif.datatype`,
+The Amiga side is gfopenimage's datatypes (`heif.datatype`,
 `opensound.datatype`, `openvideo.datatype`, and `webm.datatype` for its
 sound). They
 assume a services card, or PiStorm-class or AmiCradle-class networking to
@@ -143,7 +143,7 @@ VFRAME's `extra[1]` picks the pixels: 0 for 256 colours, 1 for 24-bit RGB,
 2 for HAM8 (below).
 
 VFRAME in 256 colours is one byte a pixel, rows packed, in the 6x6x6
-colour cube that openamigaimage's webm.datatype uses (index i < 216 is red
+colour cube that gfopenimage's webm.datatype uses (index i < 216 is red
 i / 36, green i / 6 % 6, blue i % 6, each step 51; 216 to 255 a grey ramp,
 unused here), with 4x4 ordered dithering. In 24-bit it is R, G, B bytes.
 Frames asked for in order are decoded straight on; going back, or jumping

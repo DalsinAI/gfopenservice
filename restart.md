@@ -1,4 +1,4 @@
-# Restart: Nursery (openamigaservice)
+# Restart: Nursery (gfopenservice)
 
 _Written 6 October 2026 at about 23:55 UTC, while all work is paused on @SacredTrees's word (23:28 UTC). Read this first when work resumes; the newest capsule and the live PR list win if they disagree._
 
@@ -36,9 +36,9 @@ Datatypes thread; JSC thread for TLS.
 
 ## Capsules
 
-Restart capsules for this repo's workstreams, in amigachrome's `capjumps/` shelf:
+Restart capsules for this repo's workstreams, in amicradle's `capjumps/` shelf:
 
-- [`20261006_AmigaChrome_Datatypes_OpenPlay_Restart_Capsule.zip`](https://github.com/DalsinAI/amigachrome/tree/main/capjumps)
-- [`20261006_AmigaChrome_OpenBrowser_JSC_Restart_Capsule.zip`](https://github.com/DalsinAI/amigachrome/tree/main/capjumps)
+- [`20261006_AmigaChrome_Datatypes_OpenPlay_Restart_Capsule.zip`](https://github.com/DalsinAI/amicradle/tree/main/capjumps)
+- [`20261006_AmigaChrome_OpenBrowser_JSC_Restart_Capsule.zip`](https://github.com/DalsinAI/amicradle/tree/main/capjumps)
 
 Team rules that still hold: commits as SacredTrees with no co-author lines; third-party code only on "yes with review" (licence checked, commit and sha256 pinned, fetched at build, never committed); deploys with deploy_dev.py only, on a typed line.

@@ -1542,13 +1542,13 @@ print("auth: Basic, and Digest with MD5 and SHA-256 (a POST too, its body sent a
       "wrong credentials give the 401 back")
 
 # ---- compressed bodies through the datatypes: src/wfnet_dec.c over stream.datatype's core --------------
-# The Amiga's own glue, built with opendatatypes' portable cores (stream/sdtcore.c, gzip/gzcore.c on the
+# The Amiga's own glue, built with gfopendatatypes' portable cores (stream/sdtcore.c, gzip/gzcore.c on the
 # host's zlib in z.library's place, brotli/brdecode.c) behind host/wfnet_dt.c's NewDTObject() and methods.
-#   ODT         the opendatatypes checkout (default: beside this one); without it this part is skipped
+#   ODT         the gfopendatatypes checkout (default: beside this one); without it this part is skipped
 #   BROTLI_RFC  RFC 7932's text or its dictionary, for brotli.datatype's (fetched when missing; else no br)
 #   CFLAGS      more flags for that build (-fsanitize=address,undefined, with the runtime preloaded)
 
-ODT = os.environ.get("ODT") or os.path.join(HERE, "..", "..", "opendatatypes")
+ODT = os.environ.get("ODT") or os.path.join(HERE, "..", "..", "gfopendatatypes")
 DT = os.path.join(ODT, "Datatypes")
 if os.path.isfile(os.path.join(DT, "stream", "sdtcore.c")):
     root = os.path.join(HERE, "..")
@@ -1617,7 +1617,7 @@ if os.path.isfile(os.path.join(DT, "stream", "sdtcore.c")):
         c = zlib.compressobj(6, zlib.DEFLATED, -15)
         return c.compress(b) + c.flush()
 
-    VEC = {}                                # opendatatypes' Brotli vectors, made with Google's encoder
+    VEC = {}                                # gfopendatatypes' Brotli vectors, made with Google's encoder
     with open(os.path.join(DT, "tests", "brotli-vectors.txt")) as f:
         for line in f:
             if line.strip() and not line.startswith("#"):
@@ -1740,7 +1740,7 @@ if os.path.isfile(os.path.join(DT, "stream", "sdtcore.c")):
           "(decode=datatypes); 3 MB through a 16 KB window over HTTP/1.1 and HTTP/2, one after another; three "
           "pages read side by side, a little at a time; every object disposed")
 else:
-    print(f"datatypes' glue: skipped, no opendatatypes checkout at {ODT} (set ODT)")
+    print(f"datatypes' glue: skipped, no gfopendatatypes checkout at {ODT} (set ODT)")
 
 # ---- an independent HTTP/2 server: Go's net/http, when Go is here ----------------------------------------
 
