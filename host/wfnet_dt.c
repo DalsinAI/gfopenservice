@@ -1,6 +1,6 @@
 /*
  * The datatypes calls of src/wfnet_dec.h on Linux, for host/test_wfnet.py:
- * stream.datatype's portable core (opendatatypes Datatypes/stream/sdtcore.c)
+ * stream.datatype's portable core (gfopendatatypes Datatypes/stream/sdtcore.c)
  * with gzip.datatype's decoder (gzip/gzcore.c, over z.library's calls,
  * tests/zlhost.c) and brotli.datatype's (brotli/brdecode.c, with
  * WITH_BROTLI), standing in for datatypes.library's NewDTObject() and the

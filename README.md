@@ -1,4 +1,4 @@
-# openamigaservice: Nursery
+# gfopenservice: Nursery
 
 **Nursery** is the whole system: `gfopenservice.device` on the Amiga, the
 AutoConfig boards that carry services (the services card, CPU cores), the
@@ -38,7 +38,7 @@ Programs ask by name and do not know where the work runs:
 | `src/owfetch.c` | `OWFetch`: fetches a URL through `openweb.fetch/1`, prints the status and headers, writes the body |
 | `host/openweb_fetch.c` | `openweb.fetch/1` on the host: HTTP and HTTPS fetches with OpenSSL 3, zlib and Brotli, many at once, each with its own handle (docs/OPENWEB_FETCH.md) |
 | `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, FluidSynth, sidplayfp) and the services' result cache |
-| `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c`, `host/media_svg.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD, SVG drawn at any size and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for openamigaimage's datatypes (docs/MEDIA_DECODE.md) |
+| `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c`, `host/media_svg.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD, SVG drawn at any size and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for gfopenimage's datatypes (docs/MEDIA_DECODE.md) |
 | `opentls/` | An OpenSSL 3 provider for AmiSSL that sends a TLS handshake's key maths to `opentls.key/1`, and does it on the 68k when nothing answers |
 
 The board's registers and rings, and the LAN framing, are in the AmiCradle
@@ -68,8 +68,8 @@ call goes to the least busy one, so a cluster of Cradles shares the work.
 ## Building
 
 `./build.sh`, with the os32-gcc16 compiler (`OS32_GCC16`), and `OWFetch`
-with the os32 stove's GCC 6.5 (`OS32`), with the openamigatls and
-opendatatypes checkouts beside this one (`OPENTLS`, `ODT`) for their
+with the os32 stove's GCC 6.5 (`OS32`), with the gfopentls and
+gfopendatatypes checkouts beside this one (`OPENTLS`, `ODT`) for their
 headers. Install `gfopenservice.device` in `DEVS:`. The native transport
 undoes compressed bodies when stream.datatype, gzip.datatype and
 brotli.datatype are in `SYS:Classes/DataTypes` (and z.library in `LIBS:`
@@ -95,7 +95,7 @@ LibreOffice; `host/test_openweb_fetch.py` against HTTP and HTTPS servers it
 starts on 127.0.0.1, with a throwaway certificate it makes with `openssl`;
 `host/test_wfnet.py` the native transport against HTTP/1.1, HTTP/2,
 WebSocket and proxy servers it starts, and RFC 7541's examples, and its
-decoders over opendatatypes' stream core when that checkout is there.
+decoders over gfopendatatypes' stream core when that checkout is there.
 
 Measured on AmigaOS 3.2.3 (AmiCradle, GFOpenSocket) against a Cradle on
 other x86 cores: 500 `echo/1` calls, all correct, 2.2 ms each.

@@ -476,7 +476,7 @@ datatypes.library is opened the first time it is wanted and kept until
 the `wf_service` closes; when it is missing it is not looked for again.
 `src/wfnet_dec.c` is portable C: the machine gives it `NewDTObject()`, the
 three methods and `DisposeDTObject()` (`src/wfnet_amiga.c`), and the host
-test gives it opendatatypes' own portable core instead (`host/wfnet_dt.c`,
+test gives it gfopendatatypes' own portable core instead (`host/wfnet_dt.c`,
 below). `host/wfnet_posix.c` alone plugs zlib into the hook.
 
 What an Amiga needs, a GFOpenBrowser build too: stream.datatype,
@@ -554,7 +554,7 @@ for (;;) {
 
 ### The PiStorm back end (design only)
 
-The appliance's PiStorm plan (amigachrome `appliance/pistorm/README.md`)
+The appliance's PiStorm plan (amicradle `appliance/pistorm/README.md`)
 runs Linux on the Pi with the AmiCradle runtime on its ARM64 cores, and
 the A1200's own bus for its keyboard, mouse and floppy. There the services
 card is the same card in the same runtime, so this service needs no change:
@@ -619,7 +619,7 @@ WebSocket echo (ping and pong both ways, parts, large messages, close from
 either side, a wrong accept key); a proxy (absolute form, CONNECT for
 HTTPS, HTTP/2 and WebSocket, the environment and `no_proxy`, a 407 with
 Basic); Basic and Digest auth (MD5, SHA-256, a POST sent again);
-compressed bodies through `src/wfnet_dec.c` over opendatatypes' portable
+compressed bodies through `src/wfnet_dec.c` over gfopendatatypes' portable
 stream core (`ODT`, the checkout, default beside this one; skipped
 without it): gzip, x-gzip, gzip members, zlib and raw deflate, Brotli
 (with RFC 7932's dictionary, `BROTLI_RFC`), two codings in a row, fed and

@@ -722,7 +722,7 @@ static int video_open(struct video *v, const uint8_t *d, uint32_t n, int own, ui
 
 /* The 6x6x6 colour cube with 4x4 ordered dithering: index i < 216 is red
  * (i / 36), green (i / 6 % 6) and blue (i % 6), each step 51, as
- * openamigaimage's webm.datatype draws. */
+ * gfopenimage's webm.datatype draws. */
 static void dither(const uint8_t *rgb, int pitch, uint32_t w, uint32_t h, uint8_t *out)
 {
     static const uint8_t bayer[4][4] = { { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 } };

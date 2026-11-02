@@ -30,11 +30,11 @@ CC65=${OS32:-"$HOME/AmiCradle/stoves/os32"}/prefix/bin/m68k-amigaos-gcc
 # The native transport (src/wfnet*.c: HTTP/1.1, HTTP/2, WebSocket, proxies,
 # auth) comes with it, over bsdsocket.library and gfopentls.library, whose
 # headers are GFOpenTLS's, and datatypes.library for compressed bodies, with
-# stream.datatype's header from opendatatypes.
-#   OPENTLS  the openamigatls checkout (default: beside this one)
-#   ODT      the opendatatypes checkout (default: beside this one)
-OPENTLS=${OPENTLS:-"$HERE/../openamigatls"}
-ODT=${ODT:-"$HERE/../opendatatypes"}
+# stream.datatype's header from gfopendatatypes.
+#   OPENTLS  the gfopentls checkout (default: beside this one)
+#   ODT      the gfopendatatypes checkout (default: beside this one)
+OPENTLS=${OPENTLS:-"$HERE/../gfopentls"}
+ODT=${ODT:-"$HERE/../gfopendatatypes"}
 WFNET="src/wfnet.c src/wfnet_h2.c src/wfnet_hpack.c src/wfnet_auth.c src/wfnet_dec.c src/wfnet_amiga.c"
 "$CC65" $SOFT -noixemul -Os -fno-delete-null-pointer-checks -Wall -Werror -Iinclude -Isrc -I"$OPENTLS/include" \
     -I"$ODT/Datatypes/include" -o bin/OWFetch src/owfetch.c src/webfetch.c $WFNET
