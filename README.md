@@ -33,6 +33,7 @@ Programs ask by name and do not know where the work runs:
 | `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice or Apache OpenOffice (docs/DOC_RENDER.md); `host/office_pdf.py` drives OpenOffice |
 | `host/cdxl.c`, `host/media_cdxl.py` | `media.cdxl/1`: any movie into CDXL for an ECS, AGA or RTG Amiga, as an option (docs/MEDIA_CDXL.md); `media_cdxl.py` does it from the Cradle's command line |
 | `src/tocdxl.c` | `ToCDXL`, the Amiga command for `media.cdxl/1` |
+| `src/mediahandler.c`, `devs/MEDIA` | `MEDIA:`, a read-only DOS handler (`L:media-handler`) that decodes files through `media.decode/1` for shell scripts and programs without datatypes: `Copy MEDIA:ilbm/Work:grad.qoi RAM:grad.iff` (docs/MEDIA_HANDLER.md) |
 | `src/webfetch.c`, `include/openweb/webfetch.h` | The Amiga's side of `openweb.fetch/1`, for any program to link (docs/OPENWEB_FETCH.md) |
 | `src/wfnet*.c`, `include/openweb/wfnet.h` | The native transport of `openweb.fetch`: HTTP/1.1, HTTP/2 (our own HPACK), WebSocket, proxies and HTTP auth over the Amiga's bsdsocket.library and gfopentls.library, when no card or Cradle offers it; gzip, deflate and Brotli bodies undone by the datatypes (`src/wfnet_dec.c`: stream.datatype's gzip.datatype and brotli.datatype through datatypes.library); portable C, tested on Linux through `host/wfnet_posix.c` |
 | `src/owfetch.c` | `OWFetch`: fetches a URL through `openweb.fetch/1`, prints the status and headers, writes the body |
@@ -70,7 +71,9 @@ call goes to the least busy one, so a cluster of Cradles shares the work.
 `./build.sh`, with the os32-gcc16 compiler (`OS32_GCC16`), and `OWFetch`
 with the os32 stove's GCC 6.5 (`OS32`), with the gfopentls and
 gfopendatatypes checkouts beside this one (`OPENTLS`, `ODT`) for their
-headers. Install `gfopenservice.device` in `DEVS:`. The native transport
+headers. Install `gfopenservice.device` in `DEVS:`, and for `MEDIA:`
+`bin/media-handler` as `L:media-handler` and `devs/MEDIA` in
+`DEVS:DOSDrivers`. The native transport
 undoes compressed bodies when stream.datatype, gzip.datatype and
 brotli.datatype are in `SYS:Classes/DataTypes` (and z.library in `LIBS:`
 for gzip); without them it asks for them uncoded.
