@@ -1,0 +1,8 @@
+/* MEDIA: decodes files through gfopenservice.device's media.decode/1.
+ * DEVS:DOSDrivers/MEDIA; the handler is L:media-handler (docs/MEDIA_HANDLER.md).
+ */
+Handler   = L:media-handler
+Stacksize = 8192
+Priority  = 5
+GlobVec   = -1
+Activate  = 1
