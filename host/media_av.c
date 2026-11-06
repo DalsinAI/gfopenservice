@@ -360,7 +360,7 @@ int md_still_load(const uint8_t *d, uint32_t n, int decode, uint32_t *format, ui
     AVCodecContext *dec = NULL;
     const AVCodec *codec;
     AVPacket *pkt = NULL;
-    AVFrame *frame = NULL;
+    AVFrame *frame = NULL, *conv = NULL;
     struct SwsContext *sws = NULL;
     uint8_t *iobuf;
     int st = MD_BADREQUEST, stream, got = 0;
@@ -433,13 +433,33 @@ int md_still_load(const uint8_t *d, uint32_t n, int decode, uint32_t *format, ui
             st = MD_OK;
             goto out;
         }
+        /* swscale's converters write in blocks and may run past the end of
+         * a row: a picture whose rows weren't a multiple of their block
+         * (an 8-bit RGB PNG with a width that isn't a multiple of 4, from
+         * SDL2_image) wrote past the end of the malloc'd answer and broke
+         * the host's heap. So it converts into a frame of FFmpeg's own,
+         * padded and aligned, and the rows are copied out of that. */
         if (!(sws = sws_getContext(frame->width, frame->height, frame->format, frame->width, frame->height,
                                    AV_PIX_FMT_ARGB, SWS_POINT, NULL, NULL, NULL))
+            || !(conv = av_frame_alloc())) {
+            st = MD_HOSTERROR;
+            goto out;
+        }
+        conv->format = AV_PIX_FMT_ARGB;
+        conv->width = frame->width;
+        conv->height = frame->height;
+        if (av_frame_get_buffer(conv, 0) < 0
             || !(*argb = malloc((size_t)stride * frame->height))) {
             st = MD_HOSTERROR;
             goto out;
         }
-        sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize, 0, frame->height, argb, &stride);
+        sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize, 0, frame->height,
+                  conv->data, conv->linesize);
+        {
+            int y;
+            for (y = 0; y < frame->height; y++)
+                memcpy(*argb + (size_t)y * stride, conv->data[0] + (size_t)y * conv->linesize[0], (size_t)stride);
+        }
         if (!*flags) {
             size_t i, px = (size_t)frame->width * frame->height;
             for (i = 0; i < px; i++)
@@ -449,6 +469,7 @@ int md_still_load(const uint8_t *d, uint32_t n, int decode, uint32_t *format, ui
     }
 out:
     sws_freeContext(sws);
+    av_frame_free(&conv);
     av_frame_free(&frame);
     av_packet_free(&pkt);
     avcodec_free_context(&dec);
