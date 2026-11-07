@@ -14,6 +14,8 @@
 #include <avif/avif.h>
 #include <libheif/heif.h>
 
+#include "blob.h"
+#include "media_native.h"
 #include "media_tool.h"
 #include "media_svg.h"
 #ifdef MD_AV
@@ -310,8 +312,8 @@ static int tune(uint16_t op, uint32_t kind, uint32_t arg, const uint32_t extra[4
 }
 #endif
 
-int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer buf[4],
-            uint32_t *result, uint32_t *aux)
+static int call_one(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer buf[4],
+                    uint32_t *result, uint32_t *aux)
 {
     struct picture p;
     uint32_t ow, oh;
@@ -345,6 +347,8 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
         return md_video_upload(arg, &buf[0], extra, result, aux);
     if (op == MD_VFRAME)
         return md_video_frame(arg, extra, &buf[1], result, aux);
+    if (op == MD_VINDEX)
+        return md_video_index(arg, result, aux);
     if (op == MD_VCLOSE)
         return md_video_close(arg);
     if ((op == MD_PROBE || op == MD_DECODE) && buf[0].in && buf[0].length) {
@@ -403,4 +407,33 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
     default:
         return MD_BADREQUEST;
     }
+}
+
+/* Files sent once (blob.h): the file named in extra[3] when buf0 is empty,
+ * kept with KEEP (its handle to buf3), let go with DROP or RELEASE. */
+int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer buf[4],
+            uint32_t *result, uint32_t *aux)
+{
+    struct md_buffer sent = buf[0];
+    struct blob_use use;
+    uint32_t ex[4];
+    int st;
+
+    *result = *aux = 0;
+    if (op == MD_RELEASE)
+        return blob_release(arg);
+    if (op == MD_NDECODE && !md_native_ready())
+        return MD_BADREQUEST;           /* built without our decoders */
+    if (op != MD_PROBE && op != MD_DECODE && op != MD_VOPEN && op != MD_NDECODE)
+        return call_one(op, arg, extra, buf, result, aux);
+    if (!buf[0].in)
+        buf[0].length = 0;
+    if ((st = blob_before(extra[3], &buf[0].in, &buf[0].length, &use)) != 0)
+        return st;
+    memcpy(ex, extra, sizeof ex);
+    ex[3] &= ~(BLOB_KEEP | BLOB_DROP | ~(uint32_t)0 << BLOB_SHIFT);
+    st = op == MD_NDECODE ? md_native_decode(arg, ex, buf, result, aux) : call_one(op, arg, ex, buf, result, aux);
+    blob_after(st == MD_OK, extra[3], buf[0].in, buf[0].length, buf[3].out, buf[3].length, &buf[3].written, &use);
+    buf[0] = sent;
+    return st;
 }
