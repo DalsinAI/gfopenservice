@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds gfopenservice.device, Nursery, ServiceTest, ToCDXL and media-handler for AmigaOS 3.x with the
 # os32-gcc16 compiler (GCC 16.2, libnix), OWFetch with the os32 stove (GCC 6.5),
-# and the host side's libraries: TLS keys, media decoding, documents and web fetches.
+# and the host side's libraries: TLS keys, media decoding and encoding, documents and web fetches.
 #   OS32_GCC16  compiler root holding prefix/ (default ~/AmiCradle/stoves/os32-gcc16)
 # MIT, Copyright (c) 2026 AmiCradle Team.
 set -e
@@ -57,6 +57,9 @@ if pkg-config --exists libavif libheif 2>/dev/null; then
         gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_tool.c host/media_svg.c host/hostrun.c -lpthread -lz -ldl -lm $(pkg-config --cflags --libs libavif libheif)
     fi
 fi
+# media.encode/1: runs the ffmpeg program at run time (its own process: no
+# FFmpeg headers or libraries here); HEIC's container is our own code.
+gcc -O2 -Wall -fPIC -shared -o host/libmediaencode.so host/media_encode.c host/heif_mux.c host/hostrun.c -lpthread
 # doc.render/1: needs LibreOffice and poppler's tools at run time only.
 gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c host/hostrun.c -lpthread -ldl
 # The native transport's own code on Linux, for host/test_wfnet.py: POSIX
