@@ -10,8 +10,9 @@ Services here: the directory (OPEN, CLOSE, LIST, CANCEL), echo/1, which
 copies buffer 0 into buffer 1 as the emulator's test service does,
 opentls.key/1 (host/opentls_key.c) when host/libopentlskey.so is built, and
 media.decode/1 (host/media_decode.c) when host/libmediadecode.so is built,
-media.cdxl/1 (host/cdxl.c) when it is built with FFmpeg, and doc.render/1
-(host/doc_render.c) when host/libdocrender.so is.
+media.cdxl/1 (host/cdxl.c) when it is built with FFmpeg, doc.render/1
+(host/doc_render.c) when host/libdocrender.so is, and media.encode/1
+(host/media_encode.c) when host/libmediaencode.so is.
 
   nursery_host.py --fingerprint <fp>
 
@@ -77,8 +78,18 @@ try:                                                  # host/libdocrender.so, wh
 except OSError:
     pass
 
+try:                                                  # host/libmediaencode.so, when built
+    import media_encode
+
+    def encode(op, arg, bufs, extra, flags=0, lengths=(0, 0, 0, 0)):
+        return media_encode.call(op, arg, extra, flags, bufs, lengths)
+
+    SERVICES["media.encode/1"] = encode
+except OSError:
+    pass
+
 # Services whose answers fill buffers the Amiga sized: they get the flags and room.
-SIZED = {"opentls.key/1", "media.decode/1", "media.cdxl/1", "doc.render/1"}
+SIZED = {"opentls.key/1", "media.decode/1", "media.cdxl/1", "doc.render/1", "media.encode/1"}
 
 
 class Connection(socketserver.BaseRequestHandler):

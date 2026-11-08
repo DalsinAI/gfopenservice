@@ -7,8 +7,8 @@ its Amiga side, the `Nursery` command that lists what is there, and the
 Cradle-side services.
 
 `gfopenservice.device` hands work from an Amiga to a named service, such as
-`opentls.key/1` for TLS key maths, `media.decode/1` for datatypes, and
-`openweb.fetch/1` for HTTP and HTTPS.
+`opentls.key/1` for TLS key maths, `media.decode/1` and `media.encode/1` for
+datatypes, and `openweb.fetch/1` for HTTP and HTTPS.
 Programs ask by name and do not know where the work runs:
 
 - **On a board in this machine.** Every AmiCradle Team AutoConfig board with the
@@ -28,7 +28,7 @@ Programs ask by name and do not know where the work runs:
 | `src/mdns.c` | One mDNS question for `_amicradle._tcp.local` |
 | `src/nursery.c` | `Nursery`: lists the boards and the Cradles on the LAN, and their services |
 | `src/servicetest.c` | `ServiceTest`: open, list and `echo/1` calls, checked and timed |
-| `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1`, `media.decode/1` and `doc.render/1` |
+| `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1`, `media.decode/1`, `media.encode/1` and `doc.render/1` |
 | `host/opentls_key.c` | `opentls.key/1` on the host (docs/OPENTLS_KEY.md) |
 | `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice or Apache OpenOffice (docs/DOC_RENDER.md); `host/office_pdf.py` drives OpenOffice |
 | `host/cdxl.c`, `host/media_cdxl.py` | `media.cdxl/1`: any movie into CDXL for an ECS, AGA or RTG Amiga, as an option (docs/MEDIA_CDXL.md); `media_cdxl.py` does it from the Cradle's command line |
@@ -42,6 +42,7 @@ Programs ask by name and do not know where the work runs:
 | `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c`, `host/media_svg.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD, SVG drawn at any size and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for gfopenimage's datatypes (docs/MEDIA_DECODE.md); WebM frames by packet in webm.datatype's own colours |
 | `host/media_native.c`, `host/build_native.sh` | `media.decode/1`'s NDECODE: the Amiga's own PNG, TGA, GIF and WebP decoders, built for the host from the gfopendatatypes checkout, so the services card gives the 68k's pixels byte for byte |
 | `host/blob.c` | Files sent once: kept on the host by handle for `media.decode/1` and `doc.render/1` |
+| `host/media_encode.c`, `host/heif_mux.c` | `media.encode/1` on the host: HEIC pictures, AAC/M4A and WMA sounds, HEVC and WMV films written by the `ffmpeg` program in its own process from the pixels, samples and frames an Amiga's datatypes send; HEIC's container is our own (docs/MEDIA_ENCODE.md) |
 | `opentls/` | An OpenSSL 3 provider for AmiSSL that sends a TLS handshake's key maths to `opentls.key/1`, and does it on the 68k when nothing answers |
 
 The board's registers and rings, and the LAN framing, are in the AmiCradle
