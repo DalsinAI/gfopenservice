@@ -13,6 +13,11 @@
 #define DR_RENDER 2   /* arg page, buf0 file, extra[0..1] largest page size -> buf1 ARGB; result width, aux height */
 #define DR_TEXT   3   /* buf0 file -> buf1 the text, ISO-8859-1, lines ending in LF; result bytes */
 
+#define DR_RELEASE 34 /* arg a file kept with KEEP (blob.h): let it go */
+
+/* extra[3] of PROBE, RENDER and TEXT: files sent once (blob.h). */
+#define DR_GONE (-7)  /* the kept file named is no longer here: send it again */
+
 #define DR_KIND_DOCUMENT 4
 
 /* Status, as the services card's. */

@@ -514,7 +514,10 @@ struct video {
     AVPacket **vq;             /* live: video packets read ahead while sound was wanted */
     uint32_t vq_head, vq_n, vq_cap;
     struct track *sound;       /* VSOUND's, opened at the first VSOUND */
+    struct pindex *px;         /* VINDEX's packets and decoder, for VFRAME's MD_PIX_WEBM */
 };
+
+static void pindex_free(struct pindex *x);
 
 /* A video's sound for VSOUND: 8-bit signed mono at the rate asked, kept as
  * a window of samples by their place from time zero. A file's sound has a
@@ -566,6 +569,7 @@ static void video_free(struct video *v)
         v->vq_n--;
     }
     free(v->vq);
+    pindex_free(v->px);
     track_free(v->sound);
     av_frame_free(&v->frame);
     av_frame_free(&v->rgb);
@@ -1334,6 +1338,275 @@ int md_video_open_url(const struct md_buffer *url, const uint32_t extra[4], uint
     return MD_OK;
 }
 
+/* ---- by packet, in webm.datatype's colours (VINDEX, VFRAME MD_PIX_WEBM) --
+ *
+ * gfopenimage's webm.datatype numbers a WebM's frames as its blocks come in
+ * the file, decodes them with libvpx and draws each in 256 colours with its
+ * own integer BT.601 and 4x4 dither (webm/webm_dither.h). Here the same
+ * packets go through FFmpeg's own VP8 and VP9 decoders, which give libvpx's
+ * pictures bit for bit, and the same arithmetic draws them: the Amiga gets
+ * the bytes its 68k would have made. The picture is kept from one frame to
+ * the next, as the datatype's is (a frame that shows nothing, such as VP8's
+ * hidden golden frames, leaves the last one).
+ */
+struct pindex {
+    AVPacket **pk;             /* the video's packets in file order */
+    uint32_t n;
+    AVCodecContext *dec;       /* apart from the steady path's decoder */
+    AVFrame *frame;
+    int64_t last;              /* the packet last decoded; -1 none (start from a key frame) */
+    uint8_t *chunky;           /* the picture as the Amiga holds it: cw x ch, pitch cw */
+    uint32_t cw, ch;
+    int16_t y[256], rv[256], gu[256], gv[256], bu[256];
+};
+
+static void pindex_free(struct pindex *x)
+{
+    uint32_t i;
+
+    if (!x)
+        return;
+    for (i = 0; i < x->n; i++)
+        av_packet_free(&x->pk[i]);
+    free(x->pk);
+    av_frame_free(&x->frame);
+    avcodec_free_context(&x->dec);
+    free(x->chunky);
+    free(x);
+}
+
+/* webm_dither_init: the coefficients scaled by 64 (8.6 fixed point). */
+static void pindex_tables(struct pindex *x)
+{
+    int i;
+
+    for (i = 0; i < 256; i++) {
+        x->y[i] = (int16_t)((298 * (i - 16)) >> 2);
+        x->rv[i] = (int16_t)((409 * (i - 128)) >> 2);
+        x->gu[i] = (int16_t)((-100 * (i - 128)) >> 2);
+        x->gv[i] = (int16_t)((-208 * (i - 128)) >> 2);
+        x->bu[i] = (int16_t)((516 * (i - 128)) >> 2);
+    }
+}
+
+static int clamp8(int v)
+{
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+/* webm_dither: frame f into the kept picture; only the pixels both have. */
+static int pindex_draw(struct pindex *x, const AVFrame *f)
+{
+    static const uint8_t bayer[4][4] = { { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 } };
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
+    uint32_t w = x->cw, h = x->ch, xx, yy;
+    int sx, sy, rgb;
+
+    if (!desc || desc->comp[0].depth != 8 || desc->nb_components < 3 || (desc->flags & AV_PIX_FMT_FLAG_PAL))
+        return MD_BADREQUEST;          /* 10 and 12 bits: the 68k's libvpx has no high bit depth */
+    rgb = (desc->flags & AV_PIX_FMT_FLAG_RGB) != 0;   /* VP9 from RGB: planes G, B, R as libvpx's */
+    sx = desc->log2_chroma_w;
+    sy = desc->log2_chroma_h;
+    if ((uint32_t)f->width < w)
+        w = (uint32_t)f->width;
+    if ((uint32_t)f->height < h)
+        h = (uint32_t)f->height;
+    for (yy = 0; yy < h; yy++) {
+        const uint8_t *py = f->data[0] + (size_t)yy * f->linesize[0];
+        const uint8_t *pu = f->data[1] + (size_t)(yy >> sy) * f->linesize[1];
+        const uint8_t *pv = f->data[2] + (size_t)(yy >> sy) * f->linesize[2];
+        const uint8_t *dither = bayer[yy & 3];
+        uint8_t *row = x->chunky + (size_t)yy * x->cw;
+        if (rgb) {
+            for (xx = 0; xx < w; xx++) {
+                int g = py[xx], b = pu[xx >> sx], r = pv[xx >> sx];
+                int d = dither[xx & 3] * 16;
+                row[xx] = (uint8_t)(((r * 5 + d) >> 8) * 36 + ((g * 5 + d) >> 8) * 6 + ((b * 5 + d) >> 8));
+            }
+            continue;
+        }
+        for (xx = 0; xx < w; xx++) {
+            int luma = x->y[py[xx]];
+            int u = pu[xx >> sx], v = pv[xx >> sx];
+            int r = clamp8((luma + x->rv[v] + 32) >> 6);
+            int g = clamp8((luma + x->gu[u] + x->gv[v] + 32) >> 6);
+            int b = clamp8((luma + x->bu[u] + 32) >> 6);
+            int d = dither[xx & 3] * 16;
+            row[xx] = (uint8_t)(((r * 5 + d) >> 8) * 36 + ((g * 5 + d) >> 8) * 6 + ((b * 5 + d) >> 8));
+        }
+    }
+    return MD_OK;
+}
+
+/* Every packet of the video, in file order, and a decoder of FFmpeg's own. */
+static int pindex_build(struct video *v, struct pindex **out)
+{
+    struct pindex *x;
+    struct mem m = { v->file, v->mem.size, 0 };
+    AVFormatContext *fmt = NULL;
+    AVIOContext *io = NULL;
+    AVPacket *pkt = NULL;
+    const AVCodec *codec;
+    enum AVCodecID id = v->dec->codec_id;
+    uint8_t *iobuf;
+    uint32_t cap = 0;
+    int st = MD_HOSTERROR;
+
+    if (id != AV_CODEC_ID_VP8 && id != AV_CODEC_ID_VP9)
+        return MD_BADREQUEST;
+    /* FFmpeg's own decoders, never a libvpx wrapper it may also have. */
+    if (!(codec = avcodec_find_decoder_by_name(id == AV_CODEC_ID_VP8 ? "vp8" : "vp9")))
+        return MD_BADREQUEST;
+    if (!(x = calloc(1, sizeof *x)))
+        return MD_HOSTERROR;
+    x->last = -1;
+    pindex_tables(x);
+    if (!(iobuf = av_malloc(65536)))
+        goto out;
+    if (!(io = avio_alloc_context(iobuf, 65536, 0, &m, mem_read, NULL, mem_seek))) {
+        av_free(iobuf);
+        goto out;
+    }
+    if (!(fmt = avformat_alloc_context()))
+        goto out;
+    fmt->pb = io;
+    st = MD_BADREQUEST;
+    if (avformat_open_input(&fmt, NULL, NULL, NULL) < 0 || v->stream >= (int)fmt->nb_streams)
+        goto out;
+    st = MD_HOSTERROR;
+    if (!(pkt = av_packet_alloc()))
+        goto out;
+    while (av_read_frame(fmt, pkt) >= 0) {
+        if (pkt->stream_index != v->stream) {
+            av_packet_unref(pkt);
+            continue;
+        }
+        if (x->n == cap) {
+            AVPacket **more = realloc(x->pk, (cap = cap ? cap * 2 : 1024) * sizeof *more);
+            if (!more)
+                goto out;
+            x->pk = more;
+        }
+        if (!(x->pk[x->n] = av_packet_alloc()))
+            goto out;
+        av_packet_move_ref(x->pk[x->n++], pkt);
+    }
+    st = MD_BADREQUEST;
+    if (!x->n)
+        goto out;
+    st = MD_HOSTERROR;
+    if (!(x->dec = avcodec_alloc_context3(codec))
+        || avcodec_parameters_to_context(x->dec, fmt->streams[v->stream]->codecpar) < 0 || !(x->frame = av_frame_alloc()))
+        goto out;
+    x->dec->thread_count = 1;          /* one picture out for each packet in, at once */
+    st = MD_BADREQUEST;
+    if (avcodec_open2(x->dec, codec, NULL) < 0)
+        goto out;
+    st = MD_OK;
+out:
+    av_packet_free(&pkt);
+    avformat_close_input(&fmt);
+    if (io) {
+        av_freep(&io->buffer);
+        avio_context_free(&io);
+    }
+    if (st != MD_OK) {
+        pindex_free(x);
+        x = NULL;
+    }
+    *out = x;
+    return st;
+}
+
+int md_video_index(uint32_t handle, uint32_t *result, uint32_t *aux)
+{
+    struct video *v;
+    int st = MD_OK;
+
+    if (!handle || handle > MAX_VIDEOS)
+        return MD_BADREQUEST;
+    pthread_mutex_lock(&video_lock);
+    v = &videos[handle - 1];
+    if (!v->used || v->live || !v->dec)
+        st = MD_BADREQUEST;
+    else if (!v->px)
+        st = pindex_build(v, &v->px);
+    if (st == MD_OK) {
+        AVCodecParameters *par = v->fmt->streams[v->stream]->codecpar;
+        *result = v->px->n;
+        *aux = (uint32_t)(par->width & 0xffff) << 16 | (uint32_t)(par->height & 0xffff);
+    }
+    pthread_mutex_unlock(&video_lock);
+    return st;
+}
+
+/* Packet i through the decoder; each picture it gives drawn. */
+static int pindex_feed(struct pindex *x, uint32_t i)
+{
+    int r = avcodec_send_packet(x->dec, x->pk[i]);
+
+    if (r < 0)
+        return MD_BADREQUEST;
+    for (;;) {
+        r = avcodec_receive_frame(x->dec, x->frame);
+        if (r == AVERROR(EAGAIN) || r == AVERROR_EOF)
+            return MD_OK;
+        if (r < 0)
+            return MD_BADREQUEST;
+        r = pindex_draw(x, x->frame);
+        av_frame_unref(x->frame);
+        if (r != MD_OK)
+            return r;
+    }
+}
+
+/* VFRAME with MD_PIX_WEBM: packet extra[0] (past the end: the last), into
+ * an extra[2] x extra[3] picture, decoded as webm.datatype's decodeRequest
+ * does: on from the packet last decoded, or afresh from the key frame at or
+ * before the one wanted when going back or past a key frame. */
+static int webm_frame(struct video *v, const uint32_t extra[4], struct md_buffer *out, uint32_t *result)
+{
+    struct pindex *x = v->px;
+    uint32_t want = extra[0], w = extra[2], h = extra[3];
+    int64_t start, i;
+    int st = MD_OK;
+
+    if (!x || !w || !h || w > 16384 || h > 16384)
+        return MD_BADREQUEST;
+    if (!out->out || out->length < w * h)
+        return MD_TOOSMALL;
+    if (want >= x->n)
+        want = x->n - 1;
+    if (x->cw != w || x->ch != h) {
+        uint8_t *c = calloc((size_t)w * h, 1);
+        if (!c)
+            return MD_HOSTERROR;
+        free(x->chunky);
+        x->chunky = c;
+        x->cw = w;
+        x->ch = h;
+    }
+    if (x->last != (int64_t)want) {
+        start = want;
+        while (start > 0 && !(x->pk[start]->flags & AV_PKT_FLAG_KEY))
+            start--;
+        if (x->last < 0 || (int64_t)want <= x->last || start > x->last)
+            avcodec_flush_buffers(x->dec);
+        else
+            start = x->last + 1;
+        x->last = -1;
+        for (i = start; i <= (int64_t)want && st == MD_OK; i++)
+            st = pindex_feed(x, (uint32_t)i);
+        if (st != MD_OK)
+            return st;
+        x->last = want;
+    }
+    memcpy(out->out, x->chunky, (size_t)w * h);
+    out->written = w * h;
+    *result = want;
+    return MD_OK;
+}
+
 int md_video_frame(uint32_t handle, const uint32_t extra[4], struct md_buffer *out, uint32_t *result, uint32_t *aux)
 {
     struct video *v;
@@ -1344,6 +1617,11 @@ int md_video_frame(uint32_t handle, const uint32_t extra[4], struct md_buffer *o
         return MD_BADREQUEST;
     pthread_mutex_lock(&video_lock);
     v = &videos[handle - 1];
+    if (v->used && extra[1] == MD_PIX_WEBM) {
+        st = webm_frame(v, extra, out, result);
+        pthread_mutex_unlock(&video_lock);
+        return st;
+    }
     if (!v->used || extra[1] > 2) {
         pthread_mutex_unlock(&video_lock);
         return MD_BADREQUEST;

@@ -49,16 +49,28 @@ fi
 # media.decode/1: pictures with libavif, and libheif with its HEVC decoder
 # plugin; sounds, video and most pictures with FFmpeg when its headers are
 # there; RAW, ImageMagick, MIDI and SID through those tools at run time.
+# NDECODE (the Amiga's own picture decoders, docs/MEDIA_DECODE.md) when the
+# gfopendatatypes checkout and libwebp's tarball are to hand
+# (host/build_native.sh); without them NDECODE says no and the Amiga decodes.
+NATIVE_CFLAGS= NATIVE_LIB=
+if NATIVE_CFLAGS=$(sh host/build_native.sh "$ODT"); then
+    NATIVE_LIB=host/obj-native/libnative.a
+else
+    NATIVE_CFLAGS=
+fi
+MD_SRC="host/media_decode.c host/media_native.c host/blob.c host/media_tool.c host/media_svg.c host/hostrun.c"
 if pkg-config --exists libavif libheif 2>/dev/null; then
     if pkg-config --exists libavformat libavcodec libswresample libswscale libavutil 2>/dev/null; then
-        gcc -O2 -Wall -DMD_AV -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_av.c host/media_tool.c host/media_svg.c host/cdxl.c host/ham8.c host/hostrun.c -lpthread -lz -ldl -lm \
+        gcc -O2 -Wall -DMD_AV $NATIVE_CFLAGS -fPIC -shared -Wl,-Bsymbolic -o host/libmediadecode.so $MD_SRC host/media_av.c host/cdxl.c host/ham8.c \
+            $NATIVE_LIB -lpthread -lz -ldl -lm \
             $(pkg-config --cflags --libs libavif libheif libavformat libavcodec libswresample libswscale libavutil)
     else
-        gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_tool.c host/media_svg.c host/hostrun.c -lpthread -lz -ldl -lm $(pkg-config --cflags --libs libavif libheif)
+        gcc -O2 -Wall $NATIVE_CFLAGS -fPIC -shared -Wl,-Bsymbolic -o host/libmediadecode.so $MD_SRC $NATIVE_LIB -lpthread -lz -ldl -lm \
+            $(pkg-config --cflags --libs libavif libheif)
     fi
 fi
 # doc.render/1: needs LibreOffice and poppler's tools at run time only.
-gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c host/hostrun.c -lpthread -ldl
+gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c host/blob.c host/hostrun.c -lpthread -ldl
 # The native transport's own code on Linux, for host/test_wfnet.py: POSIX
 # sockets, and OpenSSL and zlib standing in for GFOpenTLS and the datatypes.
 if [ -f /usr/include/openssl/ssl.h ] && [ -f /usr/include/zlib.h ]; then
