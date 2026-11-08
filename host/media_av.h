@@ -30,6 +30,8 @@ int md_video_open(const struct md_buffer *file, const uint32_t extra[4], uint8_t
                   uint32_t *result, uint32_t *aux);
 int md_video_frame(uint32_t handle, const uint32_t extra[4], struct md_buffer *out, uint32_t *result, uint32_t *aux);
 int md_video_close(uint32_t handle);
+/* VINDEX: the video's packets in file order, for VFRAME's MD_PIX_WEBM. */
+int md_video_index(uint32_t handle, uint32_t *result, uint32_t *aux);
 /* VOPENURL: a stream from the network, read forward only. */
 int md_video_open_url(const struct md_buffer *url, const uint32_t extra[4], uint8_t info[MD_INFO_SIZE],
                       uint32_t *result, uint32_t *aux);

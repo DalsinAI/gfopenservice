@@ -21,6 +21,14 @@ UTF-8), `'MD  '` (also from `'MARK'`), `'HTML'` (also `'HTM '`) and
 | 1 | PROBE | buf0 the file; `extra[0]`, `extra[1]` the largest page width and height wanted (0: any); `extra[2]` the extension as a hint, four ASCII letters big-endian, space-padded (0: none); buf1 (out) 24 bytes of info | result the pages |
 | 2 | RENDER | `arg` the page (0 the first); buf0 the file; `extra` as PROBE; buf1 (out) the pixels | result width, aux height |
 | 3 | TEXT | buf0 the file; `extra[2]` as PROBE; buf1 (out) the text | result its bytes |
+| 34 | RELEASE | `arg` a kept file | status -7 when there is no such file |
+
+Files sent once: as media.decode/1's (MEDIA_DECODE.md, "Files sent once"),
+`extra[3]` of PROBE, RENDER and TEXT keeps the file on the host (bit 1,
+KEEP: its handle to buf3), names a kept one instead of sending it again
+(bits 8-31, with an empty buf0) and lets it go after the call (bit 2,
+DROP); status -7 says a kept file has gone. gfopendoc.datatype 47.2 sends
+a document once: PROBE keeps it, every RENDER names it, the last drops it.
 
 PROBE's info, six big-endian u32s: kind (4 document), format, flags (0),
 pages, then the width and height RENDER writes for the same `extra`. A

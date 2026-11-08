@@ -39,7 +39,9 @@ Programs ask by name and do not know where the work runs:
 | `src/owfetch.c` | `OWFetch`: fetches a URL through `openweb.fetch/1`, prints the status and headers, writes the body |
 | `host/openweb_fetch.c` | `openweb.fetch/1` on the host: HTTP and HTTPS fetches with OpenSSL 3, zlib and Brotli, many at once, each with its own handle (docs/OPENWEB_FETCH.md) |
 | `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, FluidSynth, sidplayfp) and the services' result cache |
-| `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c`, `host/media_svg.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD, SVG drawn at any size and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for gfopenimage's datatypes (docs/MEDIA_DECODE.md) |
+| `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c`, `host/media_svg.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD, SVG drawn at any size and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for gfopenimage's datatypes (docs/MEDIA_DECODE.md); WebM frames by packet in webm.datatype's own colours |
+| `host/media_native.c`, `host/build_native.sh` | `media.decode/1`'s NDECODE: the Amiga's own PNG, TGA, GIF and WebP decoders, built for the host from the gfopendatatypes checkout, so the services card gives the 68k's pixels byte for byte |
+| `host/blob.c` | Files sent once: kept on the host by handle for `media.decode/1` and `doc.render/1` |
 | `host/media_encode.c`, `host/heif_mux.c` | `media.encode/1` on the host: HEIC pictures, AAC/M4A and WMA sounds, HEVC and WMV films written by the `ffmpeg` program in its own process from the pixels, samples and frames an Amiga's datatypes send; HEIC's container is our own (docs/MEDIA_ENCODE.md) |
 | `opentls/` | An OpenSSL 3 provider for AmiSSL that sends a TLS handshake's key maths to `opentls.key/1`, and does it on the 68k when nothing answers |
 
@@ -86,6 +88,8 @@ libavif and libheif with libheif's HEVC decoder plugin for `media.decode/1`
 and FFmpeg's libraries for its sounds (on Ubuntu: `libavif-dev libheif-dev
 libheif-plugin-libde265 libavformat-dev libavcodec-dev libswresample-dev`).
 Without the HEVC plugin HEIC files are refused; without FFmpeg, sounds are.
+NDECODE is built in when the gfopendatatypes checkout (`ODT`) and its
+`tarballs/libwebp-1.6.0.tar.gz` are there (`host/build_native.sh`).
 The rest of `media.decode/1`'s formats need tools at run time only:
 `imagemagick` for PSD, XCF, TGA and other pictures, `libraw-bin` for camera
 RAW, `fluidsynth` with `fluid-soundfont-gm` for MIDI, `sidplayfp` for

@@ -22,6 +22,25 @@
 #define MD_VUPLOAD 8  /* arg upload (0: a new one), buf0 its next part, extra[0] bit 0 the last part -> result
                          the upload, aux its bytes so far. VOPEN with an empty buf0 and extra[2] the upload opens it */
 
+/* Ops 32 to 47: decoding on the host for the Amiga's own decoders, and
+ * files sent once (docs/MEDIA_DECODE.md). */
+#define MD_VINDEX 32  /* arg handle -> result the video's packets in file order (each a frame of
+                         VFRAME's MD_PIX_WEBM), aux its own width << 16 | height. 8-bit VP8 and VP9 only */
+#define MD_NDECODE 33 /* arg frame, buf0 file, extra[0] the decoder ('PNG ', 'TGA ', 'GIF ', 'WEBP'),
+                         extra[1] its mode -> buf1 the pixels, buf2 (out) 16 bytes of info; result width,
+                         aux height. Our own decoders' sources (gfopendatatypes), as on the 68k */
+#define MD_RELEASE 34 /* arg a kept file (blob.h): let it go */
+
+/* VFRAME extra[1]: the pixels. */
+#define MD_PIX_CUBE 0
+#define MD_PIX_RGB  1
+#define MD_PIX_HAM8 2
+#define MD_PIX_WEBM 3 /* by packet (extra[0], MD_VINDEX's numbering), at the video's own size, in
+                         webm.datatype's colours: its integer BT.601 and 4x4 dither, as the 68k makes
+                         them; extra[2] x extra[3] the picture's size on the Amiga (pitch extra[2]) */
+
+#define MD_GONE (-7)  /* a kept file named in extra[3] is no longer here: send it again */
+
 #define MD_KIND_PICTURE 1
 #define MD_KIND_ANIMATION 2
 #define MD_KIND_SOUND   3

@@ -2,3 +2,4 @@ bin/
 obj/
 __pycache__/
 host/*.so
+host/obj-native/

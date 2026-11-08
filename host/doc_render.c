@@ -6,6 +6,7 @@
  */
 #define _GNU_SOURCE
 #include "doc_render.h"
+#include "blob.h"
 #include "hostrun.h"
 
 #include <dlfcn.h>
@@ -372,8 +373,8 @@ static uint32_t upper(uint32_t hint)
     return out;
 }
 
-int dr_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct dr_buffer buf[4],
-            uint32_t *result, uint32_t *aux)
+static int call_one(uint16_t op, uint32_t arg, const uint32_t extra[4], struct dr_buffer buf[4],
+                    uint32_t *result, uint32_t *aux)
 {
     char pdf[700];
     uint32_t format, pages, pw, ph, ow, oh;
@@ -438,4 +439,29 @@ int dr_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct dr_buffer
     *result = ow;
     *aux = oh;
     return DR_OK;
+}
+
+/* Files sent once (blob.h): the file named in extra[3] when buf0 is empty,
+ * kept with KEEP (its handle to buf3), let go with DROP or RELEASE. */
+int dr_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct dr_buffer buf[4],
+            uint32_t *result, uint32_t *aux)
+{
+    struct dr_buffer sent = buf[0];
+    struct blob_use use;
+    uint32_t ex[4];
+    int st;
+
+    *result = *aux = 0;
+    if (op == DR_RELEASE)
+        return blob_release(arg);
+    if (!buf[0].in)
+        buf[0].length = 0;
+    if ((st = blob_before(extra[3], &buf[0].in, &buf[0].length, &use)) != 0)
+        return st;
+    memcpy(ex, extra, sizeof ex);
+    ex[3] &= ~(BLOB_KEEP | BLOB_DROP | ~(uint32_t)0 << BLOB_SHIFT);
+    st = call_one(op, arg, ex, buf, result, aux);
+    blob_after(st == DR_OK, extra[3], buf[0].in, buf[0].length, buf[3].out, buf[3].length, &buf[3].written, &use);
+    buf[0] = sent;
+    return st;
 }

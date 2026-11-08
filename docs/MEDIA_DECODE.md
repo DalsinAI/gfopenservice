@@ -29,6 +29,10 @@ a Cradle, so the decoded pixels come back whole.
 | 1 | PROBE | buf0 the file; `extra[0]`, `extra[1]` the largest width and height wanted (0: any); `extra[2]` the file's extension as a hint (0: none); `extra[3]` bit 0 `MD_EXACT`, for SVG (below); buf1 (out) 24 bytes of info | result width, aux height (the picture's own) |
 | 2 | DECODE | `arg` the frame (0 the first); buf0 the file; `extra[0..3]` as PROBE; buf1 (out) the pixels | result width, aux height (of the pixels written) |
 
+Ops 32 to 47 belong to the service rung's decoding and transport (below:
+VINDEX 32, NDECODE 33, RELEASE 34); other new ops are numbered outside
+that range.
+
 PROBE's info, six big-endian u32s: kind (1 picture), format, flags (bit 0:
 alpha), frames, then the width and height DECODE will write for the same
 `extra[0]` and `extra[1]`. Formats: `'AVIF'`, `'HEIC'`, `'JPEG'`, `'PNG '`,
@@ -221,3 +225,103 @@ up to 1 GB.
 order and after seeks, a file in 64 KB parts, and VOPENURL over HTTP for an
 MP4 with its index first, a transport stream and an HLS playlist, with
 their sound.
+
+## Files sent once
+
+An Amiga that calls on one file again and again (a picture's PROBE then
+DECODE, a sound's DECODE in pieces, a tracker module's every two seconds
+of play, a document's pages) sends it once. `extra[3]` of PROBE, DECODE,
+NDECODE and VOPEN:
+
+| Bits | Name | Meaning |
+| --- | --- | --- |
+| 1 | KEEP | keep buf0's file on the host when the call succeeds; its handle goes to buf3 (4 bytes, big-endian; flags bit 3) |
+| 2 | DROP | let the named file go after this call |
+| 8-31 | | a kept file's handle: the file, when buf0 is empty |
+
+Bit 0 keeps its meaning (`MD_EXACT` for SVG). The Amiga zeroes buf3
+before a KEEP: a host without kept files leaves it 0, and the Amiga goes
+on sending the file whole, as before, with no extra trip to find out.
+
+| Op | Name | Request | Answer |
+| --- | --- | --- | --- |
+| 34 | RELEASE | `arg` a kept file | status -7 when there is no such file |
+
+The host keeps at most 16 files, 512 MB in all; the least recently used
+idle one goes first (a file in use by a call is never let go under it).
+A handle names its slot and a serial, so an old handle never names a newer
+file. A call naming a file that has gone answers -7 (`MD_GONE`): the Amiga
+sends the file again, with KEEP. Kept files belong to the host, as videos
+do; doc.render/1 keeps files the same way (DOC_RENDER.md). Host code:
+`host/blob.c`.
+
+gfopendatatypes' gfopenpicture, gfopensound and gfopendoc 47.2 send a
+file once (PROBE keeps it, the next call names it and drops it); gfopenmodule
+47.4 keeps the module for the whole play, so no 1 MB module goes up every
+two seconds.
+
+## WebM frames by packet
+
+gfopenimage's webm.datatype numbers a WebM's frames by its own reader
+(each block of the video track, in file order: hidden frames too), decodes
+them with libvpx and draws each in its 6x6x6 cube with its own integer
+BT.601 and 4x4 dither. With the service it asks for the same frames here,
+so they are the same bytes, tens of times sooner:
+
+| Op | Name | Request | Answer |
+| --- | --- | --- | --- |
+| 32 | VINDEX | `arg` a video from VOPEN | result its packets in file order, aux its own width << 16 \| height |
+
+VINDEX takes 8-bit VP8 and VP9 only (else -2); the packets stay in memory
+with the video. VFRAME with `extra[1]` = 3 (`MD_PIX_WEBM`) then gives
+packet `extra[0]` (past the end: the last) as `extra[2]` x `extra[3]`
+bytes, one a pixel, rows packed: the picture's size on the Amiga, which
+the datatype checks against VINDEX's. The packets go through FFmpeg's own
+VP8 and VP9 decoders (never a libvpx wrapper), which are bit-exact with
+libvpx, one picture out for each packet in; the picture is kept from one
+frame to the next as the datatype keeps its own (a packet that shows
+nothing, such as VP8's hidden golden frame, leaves the last picture), and
+frames are decoded on from the last one, or afresh from the key frame at
+or before the one asked for when going back or past a key frame: the
+datatype's own rule. VP9 from RGB (`gbrp`, planes G, B, R as libvpx's) is
+drawn as the datatype draws it; 10- and 12-bit pictures are refused (the
+68k's libvpx has no high bit depth). The steady frames of VFRAME's other
+pixel kinds, and VSOUND, are as before on the same video.
+
+`host/test_media_rung.py` checks every frame, in order and jumping about,
+against libvpx's pictures (ffmpeg decoding through libvpx) with the
+dither done in Python; gfopendatatypes' `tests/test-service-rung.sh`
+against webm.datatype's own code (its reader, libvpx 1.17.0 and its
+dither) on VP8 with hidden frames, VP9, VP9 4:4:4 and VP9 from RGB.
+
+## The Amiga's own decoders
+
+| Op | Name | Request | Answer |
+| --- | --- | --- | --- |
+| 33 | NDECODE | `arg` the frame (GIF); buf0 the file; `extra[0]` the decoder; `extra[1]` its mode; buf1 (out) the pixels; buf2 (out) 16 bytes of info | result width, aux height (of the pixels written) |
+
+The decoders are the Amiga's own, built for the host from gfopendatatypes'
+sources by `host/build_native.sh`: gfopenpng's `pngdecode.c` (`'PNG '`),
+gfopentga's `tgadecode.c` (`'TGA '`), gfopengif's `gifdecode.c` (`'GIF '`:
+mode 0 the screen after frame `arg` as ARGB, mode 1 frame 0's colour
+indexes) and libwebp 1.6.0 with webp.datatype's three patches (`'WEBP'`;
+an animation's first frame). libwebp's plain C code only, as on the 68k
+(no SSE2 or SSE4.1 files), and every symbol hidden. So the pixels are the
+68k's, byte for byte: ARGB as A, R, G, B bytes (the 68k's 0xAARRGGBB words
+as they lie in its memory), or a byte a pixel for GIF indexes.
+
+The info: width, height (the picture's, or a WebP animation's canvas),
+flags (bit 0: alpha), and a GIF frame's pixels left without a colour (mode
+1) or a WebP animation's first frame's place (x << 16 | y). A file the
+decoder refuses answers -2, as it would fail on the 68k; a buf1 too small
+-4, with result and aux the size wanted. A host built without the
+gfopendatatypes checkout answers -2 to every NDECODE.
+
+The datatypes (gfopenpng 47.7, gfopentga 47.3, gfopengif 47.5, webp
+47.4) ask only when the device says the service is on this machine's
+services card (OSCMD_WHERE): over the LAN the file and the pixels each way
+cost more than the decoding saves. Measured: a 1024 x 768 PNG takes 99.3
+million 68k instructions (about 5 s on a 25 MHz 68040, 62 ms on AC090) and
+16.7 ms here; a 1024 x 768 lossy WebP 149 million (7.5 s, 93 ms) and
+29.9 ms.
+
