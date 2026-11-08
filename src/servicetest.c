@@ -15,7 +15,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
-#include "devices/gfopenservice.h"
+#include "devices/mitchy.h"
 
 const char version[] __attribute__((used)) = "$VER: ServiceTest 0.1 (5.10.2026)";
 
@@ -106,8 +106,8 @@ int main(void)
         printf("ServiceTest: no memory or bad arguments\n");
         return RETURN_FAIL;
     }
-    if (OpenDevice((CONST_STRPTR)OPENSERVICE_NAME, 0, (struct IORequest *)io, 0)) {
-        printf("cannot open %s (%d)\n", OPENSERVICE_NAME, io->os_Req.io_Error);
+    if (OpenDevice((CONST_STRPTR)MITCHY_NAME, 0, (struct IORequest *)io, 0)) {
+        printf("cannot open %s (%d)\n", MITCHY_NAME, io->os_Req.io_Error);
         return RETURN_FAIL;
     }
     memset(io->os_Buf, 0, sizeof io->os_Buf);
