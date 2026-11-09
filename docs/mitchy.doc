@@ -1,0 +1,349 @@
+TABLE OF CONTENTS
+
+mitchy.library/MitchyAbortRequest
+mitchy.library/MitchyAllocRequest
+mitchy.library/MitchyCall
+mitchy.library/MitchyCheckRequest
+mitchy.library/MitchyClose
+mitchy.library/MitchyDoRequest
+mitchy.library/MitchyFindBoard
+mitchy.library/MitchyFreeRequest
+mitchy.library/MitchyList
+mitchy.library/MitchyOpen
+mitchy.library/MitchyRequestFromMsg
+mitchy.library/MitchySendRequest
+mitchy.library/MitchyStatusText
+mitchy.library/MitchyWaitRequest
+mitchy.library/MitchyWhere
+mitchy.library/MitchyAbortRequest
+
+
+NAME
+    MitchyAbortRequest -- cancel a request. (V1)
+
+SYNOPSIS
+    status = MitchyAbortRequest(request)
+    D0                          A0
+
+    LONG MitchyAbortRequest(struct MitchyRequest *);
+
+FUNCTION
+    Cancels a request in flight (the card's CANCEL, sent on to the
+    service) and waits for it, which is at once: the card answers a
+    CANCEL itself. A buffer the request marks written is not written
+    after this returns MERR_CANCELLED. A request that had completed
+    keeps its answer.
+
+RESULT
+    status - MERR_CANCELLED, or the answer when it had completed.
+
+mitchy.library/MitchyAllocRequest
+
+
+NAME
+    MitchyAllocRequest -- make a request for a service. (V1)
+
+SYNOPSIS
+    request = MitchyAllocRequest(service, port)
+    D0                           A0       A1
+
+    struct MitchyRequest *MitchyAllocRequest(struct MitchyService *,
+                                             struct MsgPort *);
+
+FUNCTION
+    Makes a request for the service, to be filled and sent as often as
+    wanted, one call at a time. Make it in the task that will wait for
+    it.
+
+    With port NULL, the request gets a signal of the calling task of
+    its own (mr_SigMask): it is set when a request sent with
+    MitchySendRequest completes. Wait() for it, then MitchyCheckRequest
+    or MitchyWaitRequest.
+
+    With a port, each completion is a message on that port instead
+    (many requests may share one). GetMsg() it, find its request with
+    MitchyRequestFromMsg, then call MitchyCheckRequest to take the
+    answer into its fields.
+
+RESULT
+    request - the request, or NULL when there is no memory or (port
+        NULL) no free signal.
+
+SEE ALSO
+    MitchyFreeRequest(), MitchyDoRequest(), MitchySendRequest()
+
+mitchy.library/MitchyCall
+
+
+NAME
+    MitchyCall -- one call to a service, waited for. (V1)
+
+SYNOPSIS
+    status = MitchyCall(service, op, flags, arg, buffers, extra,
+    D0                  A0       D0  D1     D2   A1       A2
+                        resultAux)
+                        A3
+
+    LONG MitchyCall(struct MitchyService *, ULONG, ULONG, ULONG,
+                    struct MitchyBuffer *, ULONG *, ULONG *);
+
+FUNCTION
+    MitchyAllocRequest, MitchyDoRequest and MitchyFreeRequest in one,
+    for a single call from any task.
+
+INPUTS
+    buffers   - four MitchyBuffers, or NULL for none.
+    extra     - four ULONGs (op-specific), or NULL for zeros.
+    resultAux - two ULONGs that get the result and aux, or NULL.
+
+RESULT
+    status - as MitchyDoRequest's.
+
+mitchy.library/MitchyCheckRequest
+
+
+NAME
+    MitchyCheckRequest -- has a request completed? (V1)
+
+SYNOPSIS
+    done = MitchyCheckRequest(request)
+    D0                        A0
+
+    BOOL MitchyCheckRequest(struct MitchyRequest *);
+
+FUNCTION
+    TRUE when the request is not in flight: it has completed, and its
+    answer is in mr_Status, mr_Result and mr_Aux (and its message, if
+    it has a port and was not taken with GetMsg yet, is taken off).
+    FALSE while the service still has it. Never waits.
+
+mitchy.library/MitchyClose
+
+
+NAME
+    MitchyClose -- close a service. (V1)
+
+SYNOPSIS
+    MitchyClose(service)
+                A0
+
+    VOID MitchyClose(struct MitchyService *);
+
+FUNCTION
+    Closes a service MitchyOpen gave. Free its requests first
+    (MitchyFreeRequest). NULL is allowed.
+
+mitchy.library/MitchyDoRequest
+
+
+NAME
+    MitchyDoRequest -- send a request and wait for its answer. (V1)
+
+SYNOPSIS
+    status = MitchyDoRequest(request)
+    D0                       A0
+
+    LONG MitchyDoRequest(struct MitchyRequest *);
+
+FUNCTION
+    Sends the request as its fields say (mr_Op, mr_Flags, mr_Arg,
+    mr_Buf, mr_Extra) and waits for it. The other tasks and the Amiga
+    run on meanwhile.
+
+RESULT
+    status - mr_Status: MITCHY_OK, a MERR_* or the service's own;
+        mr_Result and mr_Aux are the service's answer. MERR_BUSY: it
+        was in flight already.
+
+mitchy.library/MitchyFindBoard
+
+
+NAME
+    MitchyFindBoard -- find the ACSV boards in this machine. (V1)
+
+SYNOPSIS
+    board = MitchyFindBoard(previous, boardClass)
+    D0                      A0        D0
+
+    struct ConfigDev *MitchyFindBoard(struct ConfigDev *, ULONG);
+
+FUNCTION
+    The next AmiCradle Team board after previous (NULL: the first)
+    that carries the ACSV register block, of this CLASS:
+    MITCHY_CLASS_SERVICES (Mitchy), MITCHY_CLASS_CORES,
+    MITCHY_CLASS_MEDIA (AkikoPlus), or MITCHY_CLASS_ANY. Use it to say
+    whether the card is fitted, or to reach a board's own registers
+    past the block (AkikoPlus's bank windows). Never write the block's
+    RINGS, ORDER, DOORBELL or INTENA: gfopenservice.device owns them.
+
+RESULT
+    board - its ConfigDev (cd_BoardAddr, cd_BoardSize,
+        cd_Rom.er_Product), or NULL when there is no other.
+
+mitchy.library/MitchyFreeRequest
+
+
+NAME
+    MitchyFreeRequest -- free a request. (V1)
+
+SYNOPSIS
+    MitchyFreeRequest(request)
+                      A0
+
+    VOID MitchyFreeRequest(struct MitchyRequest *);
+
+FUNCTION
+    Frees a request, from the task that made it. One still in flight
+    is cancelled and waited for first. NULL is allowed.
+
+mitchy.library/MitchyList
+
+
+NAME
+    MitchyList -- the services on offer. (V1)
+
+SYNOPSIS
+    length = MitchyList(buffer, size)
+    D0                  A0      D0
+
+    LONG MitchyList(STRPTR, ULONG);
+
+FUNCTION
+    Writes the names of the services every ACSV board in this machine
+    offers, NUL-separated, one board after another; with no board,
+    those of the paired Cradles (each name once).
+
+RESULT
+    length - the bytes written, or a MERR_* (MERR_NODEVICE when
+        gfopenservice.device is not installed).
+
+mitchy.library/MitchyOpen
+
+
+NAME
+    MitchyOpen -- open a service by name. (V1)
+
+SYNOPSIS
+    service = MitchyOpen(name, flags, error)
+    D0                   A0    D0     A1
+
+    struct MitchyService *MitchyOpen(CONST_STRPTR, ULONG, LONG *);
+
+FUNCTION
+    Asks for a service by name and version, such as "echo/1" or
+    "media.decode/1": first of each ACSV board in this machine in turn
+    (Mitchy, AkikoPlus, the CPU cores board), then of the Cradles this
+    Amiga is paired with on the LAN. The handle may be used from any
+    task; each request belongs to the task that made it.
+
+INPUTS
+    name  - the service's name, at most 63 characters.
+    flags - MOF_BOARDONLY: a board in this machine only, never the LAN.
+    error - where the reason goes when it fails (MITCHY_OK when it
+            opens), or NULL.
+
+RESULT
+    service - the open service, or NULL:
+        MERR_NOSERVICE  no board or Cradle offers it;
+        MERR_NOTFITTED  there is no ACSV board in this machine, and no
+                        paired Cradle offers it: the card is not
+                        fitted, so do the work on the 68k;
+        MERR_NODEVICE   gfopenservice.device is not installed;
+        MERR_BADREQUEST no name, or one too long;
+        MERR_NOMEMORY.
+
+SEE ALSO
+    MitchyClose(), MitchyWhere(), MitchyFindBoard()
+
+mitchy.library/MitchyRequestFromMsg
+
+
+NAME
+    MitchyRequestFromMsg -- the request a completion message is for. (V1)
+
+SYNOPSIS
+    request = MitchyRequestFromMsg(message)
+    D0                             A0
+
+    struct MitchyRequest *MitchyRequestFromMsg(struct Message *);
+
+FUNCTION
+    For requests made with a port: a message GetMsg() took from it is
+    the completion of the request returned (then MitchyCheckRequest
+    it); NULL when the message is not a Mitchy request's.
+
+mitchy.library/MitchySendRequest
+
+
+NAME
+    MitchySendRequest -- send a request and go on. (V1)
+
+SYNOPSIS
+    status = MitchySendRequest(request)
+    D0                         A0
+
+    LONG MitchySendRequest(struct MitchyRequest *);
+
+FUNCTION
+    Sends the request and returns at once. Its buffers belong to the
+    service until it completes: then its signal (mr_SigMask) is set or
+    its message arrives on its port. Many requests may be in flight at
+    once; each completes on its own.
+
+RESULT
+    status - MITCHY_OK when sent; MERR_BUSY when it is in flight
+        already.
+
+SEE ALSO
+    MitchyCheckRequest(), MitchyWaitRequest(), MitchyAbortRequest()
+
+mitchy.library/MitchyStatusText
+
+
+NAME
+    MitchyStatusText -- a status in words. (V1)
+
+SYNOPSIS
+    text = MitchyStatusText(status)
+    D0                      D0
+
+    CONST_STRPTR MitchyStatusText(LONG);
+
+RESULT
+    text - a short English text, never NULL.
+
+mitchy.library/MitchyWaitRequest
+
+
+NAME
+    MitchyWaitRequest -- wait for a request to complete. (V1)
+
+SYNOPSIS
+    status = MitchyWaitRequest(request)
+    D0                         A0
+
+    LONG MitchyWaitRequest(struct MitchyRequest *);
+
+FUNCTION
+    Waits until the request completes, and returns mr_Status. A
+    request not in flight returns its last status at once. Only the
+    task that made the request may wait for it.
+
+mitchy.library/MitchyWhere
+
+
+NAME
+    MitchyWhere -- where a service runs. (V1)
+
+SYNOPSIS
+    where = MitchyWhere(service)
+    D0                  A0
+
+    LONG MitchyWhere(struct MitchyService *);
+
+RESULT
+    MITCHY_WHERE_BOARD - on a board in this machine (its host);
+    MITCHY_WHERE_LAN   - on a paired Cradle on the LAN;
+    MITCHY_WHERE_NONE  - nowhere any more: its Cradle was lost. Close it
+                         and open it again, or do the work on the 68k.
+

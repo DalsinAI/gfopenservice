@@ -27,7 +27,8 @@ Programs ask by name and do not know where the work runs:
 | `src/device.c` | `gfopenservice.device`: boards' rings, LAN connections, one worker process |
 | `src/mdns.c` | One mDNS question for `_amicradle._tcp.local` |
 | `src/nursery.c` | `Nursery`: lists the boards and the Cradles on the LAN, and their services |
-| `src/servicetest.c` | `ServiceTest`: open, list and `echo/1` calls, checked and timed |
+| `library/mitchy_lib.c`, `include/libraries/mitchy.h` | `mitchy.library`: the services for any program, by name, with no device I/O to write: open, requests waited for or sent (a signal or a message on completion), cancel, the boards (Mitchy, AkikoPlus, the CPU cores board), and a plain "not fitted" answer. On `gfopenservice.device`. Its autodoc is `docs/mitchy.doc`; `sfd/mitchy_lib.sfd` makes `fd/mitchy_lib.fd` and the `clib`, `proto`, `inline` and `pragmas` headers (`library/gen_headers.sh`) |
+| `src/servicetest.c` | `ServiceTest` 0.2, on `mitchy.library`: the boards, the list, `echo/1` waited for, in parallel by signal and by message, cancelled, too small and badly flagged, and one checked job for each real service on offer; returns 5 when no card or Cradle offers the services |
 | `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1`, `media.decode/1`, `media.encode/1` and `doc.render/1` |
 | `host/opentls_key.c` | `opentls.key/1` on the host (docs/OPENTLS_KEY.md) |
 | `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice or Apache OpenOffice (docs/DOC_RENDER.md); `host/office_pdf.py` drives OpenOffice |
@@ -47,6 +48,32 @@ Programs ask by name and do not know where the work runs:
 
 The board's registers and rings, and the LAN framing, are in the AmiCradle
 project's `design/SERVICES_CARD.md` (v1); the emulator side is built there.
+
+## mitchy.library
+
+```c
+struct Library *MitchyBase = OpenLibrary("mitchy.library", 1);
+LONG err;
+struct MitchyService *svc = MitchyOpen("media.decode/1", 0, &err);
+if (!svc) { /* err MERR_NOTFITTED: no services card here, and no paired Cradle: do it on the 68k */ }
+struct MitchyRequest *req = MitchyAllocRequest(svc, NULL);   /* its own signal: req->mr_SigMask */
+req->mr_Op = 1;
+req->mr_Flags = MBF_BUF1;                                    /* buffer 1 is written by the service */
+req->mr_Buf[0].mb_Data = file;  req->mr_Buf[0].mb_Length = fileLength;
+req->mr_Buf[1].mb_Data = info;  req->mr_Buf[1].mb_Length = 24;
+MitchyDoRequest(req);                                        /* or MitchySendRequest, Wait(mr_SigMask), MitchyCheckRequest */
+/* req->mr_Status, mr_Result, mr_Aux */
+MitchyFreeRequest(req);
+MitchyClose(svc);
+```
+
+Requests made with a port instead complete as messages on it
+(`MitchyRequestFromMsg`); `MitchyAbortRequest` cancels one at once;
+`MitchyCall` is one call from any task; `MitchyFindBoard` finds the ACSV
+boards by CLASS (AkikoPlus's `akikoplus.library` opens its services through
+this library and reaches its bank windows from its ConfigDev). The library
+never touches a board's rings: `gfopenservice.device` owns them, so every
+program shares them. Install it in `LIBS:` beside `DEVS:gfopenservice.device`.
 
 ## opentls
 
@@ -74,7 +101,7 @@ call goes to the least busy one, so a cluster of Cradles shares the work.
 `./build.sh`, with the os32-gcc16 compiler (`OS32_GCC16`), and `OWFetch`
 with the os32 stove's GCC 6.5 (`OS32`), with the gfopentls and
 gfopendatatypes checkouts beside this one (`OPENTLS`, `ODT`) for their
-headers. Install `gfopenservice.device` in `DEVS:`, and for `MEDIA:`
+headers. Install `gfopenservice.device` in `DEVS:`, `mitchy.library` in `LIBS:`, and for `MEDIA:`
 `bin/media-handler` as `L:media-handler` and `devs/MEDIA` in
 `DEVS:DOSDrivers`. The native transport
 undoes compressed bodies when stream.datatype, gzip.datatype and

@@ -1,0 +1,22 @@
+* "mitchy.library"
+* Automatically generated FD (sfdc 1.12)! Do not edit!
+##base _MitchyBase
+##bias 30
+##public
+* mitchy.library: named services on Mitchy and the ACSV boards. MIT, (c) 2026 AmiCradle Team
+MitchyOpen(name,flags,error)(a0,d0,a1)
+MitchyClose(service)(a0)
+MitchyWhere(service)(a0)
+MitchyAllocRequest(service,port)(a0,a1)
+MitchyFreeRequest(request)(a0)
+MitchyDoRequest(request)(a0)
+MitchySendRequest(request)(a0)
+MitchyCheckRequest(request)(a0)
+MitchyWaitRequest(request)(a0)
+MitchyAbortRequest(request)(a0)
+MitchyCall(service,op,flags,arg,buffers,extra,resultAux)(a0,d0,d1,d2,a1,a2,a3)
+MitchyList(buffer,size)(a0,d0)
+MitchyFindBoard(previous,boardClass)(a0,d0)
+MitchyStatusText(status)(d0)
+MitchyRequestFromMsg(message)(a0)
+##end

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds gfopenservice.device, Nursery, ServiceTest, ToCDXL and media-handler for AmigaOS 3.x with the
+# Builds gfopenservice.device, mitchy.library, Nursery, ServiceTest, ToCDXL and media-handler for AmigaOS 3.x with the
 # os32-gcc16 compiler (GCC 16.2, libnix), OWFetch with the os32 stove (GCC 6.5),
 # and the host side's libraries: TLS keys, media decoding and encoding, documents and web fetches.
 #   OS32_GCC16  compiler root holding prefix/ (default ~/AmiCradle/stoves/os32-gcc16)
@@ -20,6 +20,14 @@ for f in start device mdns paired oscrypto osrandom; do
 done
 "$CC" -nostartfiles $SOFT -o bin/gfopenservice.device obj/start.o obj/device.o obj/mdns.o obj/paired.o obj/oscrypto.o obj/osrandom.o \
     -lamiga -Wl,-Map=obj/gfopenservice.device.map
+# mitchy.library (library/, include/libraries/mitchy.h): bare, no C library
+# or start-up code; mitchy_lib.c's start() and RomTag lead the hunk. Its own
+# memcpy and memset: -fno-tree-loop-distribute-patterns keeps GCC from
+# turning their loops into calls to themselves. Its autodoc, docs/mitchy.doc.
+"$CC" $SOFT -Os -fno-delete-null-pointer-checks -Wall -Wextra -Werror -Wno-unused-parameter -fomit-frame-pointer \
+    -fno-toplevel-reorder -fno-builtin -fno-tree-loop-distribute-patterns -nostartfiles -nostdlib -Iinclude \
+    -o bin/mitchy.library library/mitchy_lib.c -lgcc
+python3 library/autodoc.py library/mitchy_lib.c > docs/mitchy.doc
 "$CC" $SOFT -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/Nursery src/nursery.c src/mdns.c src/paired.c src/oscrypto.c src/osrandom.c -lamiga
 "$CC" $SOFT -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ServiceTest src/servicetest.c -lamiga
 "$CC" $SOFT -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ToCDXL src/tocdxl.c -lamiga
