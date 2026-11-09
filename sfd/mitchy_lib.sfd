@@ -1,0 +1,27 @@
+==id $Id: mitchy_lib.sfd 1.0 (9.11.2026) $
+* mitchy.library: named services on Mitchy and the ACSV boards. MIT, (c) 2026 AmiCradle Team
+==base _MitchyBase
+==basetype struct Library *
+==libname mitchy.library
+==bias 30
+==public
+==include <exec/types.h>
+==include <exec/ports.h>
+==include <libraries/configvars.h>
+==include <libraries/mitchy.h>
+struct MitchyService * MitchyOpen(CONST_STRPTR name, ULONG flags, LONG * error)(a0,d0,a1)
+VOID MitchyClose(struct MitchyService * service)(a0)
+LONG MitchyWhere(struct MitchyService * service)(a0)
+struct MitchyRequest * MitchyAllocRequest(struct MitchyService * service, struct MsgPort * port)(a0,a1)
+VOID MitchyFreeRequest(struct MitchyRequest * request)(a0)
+LONG MitchyDoRequest(struct MitchyRequest * request)(a0)
+LONG MitchySendRequest(struct MitchyRequest * request)(a0)
+BOOL MitchyCheckRequest(struct MitchyRequest * request)(a0)
+LONG MitchyWaitRequest(struct MitchyRequest * request)(a0)
+LONG MitchyAbortRequest(struct MitchyRequest * request)(a0)
+LONG MitchyCall(struct MitchyService * service, ULONG op, ULONG flags, ULONG arg, struct MitchyBuffer * buffers, ULONG * extra, ULONG * resultAux)(a0,d0,d1,d2,a1,a2,a3)
+LONG MitchyList(STRPTR buffer, ULONG size)(a0,d0)
+struct ConfigDev * MitchyFindBoard(struct ConfigDev * previous, ULONG boardClass)(a0,d0)
+CONST_STRPTR MitchyStatusText(LONG status)(d0)
+struct MitchyRequest * MitchyRequestFromMsg(struct Message * message)(a0)
+==end
