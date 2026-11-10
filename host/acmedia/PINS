@@ -1,0 +1,21 @@
+# ACMedia's pinned sources (designs/ACMEDIA-DESIGN-20261110.md, section 4).
+# One line each: name, file, sha256, url. fetch.sh downloads into ACM_CACHE and
+# refuses any file whose sha256 differs. A new version is a new line here and a
+# PR; nothing is fetched by name alone.
+#
+# ffmpeg      LGPL 2.1+ (we never configure --enable-gpl/version3/nonfree);
+#             the tarball's GPG signature is also checked (key FCF986EA15E6E293A5644F10B4322F04D67658D8)
+# ffmpeg-rpi  Raspberry Pi's patch for 7.1.5 (RPi-Distro/ffmpeg pios/trixie at 2fe08f3):
+#             the V4L2 request HEVC hwaccel, SAND frames, DRM PRIME; MIT/BSD/LGPL files
+# dav1d       BSD-2-Clause (AV1)
+# libopenmpt  BSD-3-Clause (tracker modules)
+# libva       MIT; headers only (x86-64), linked against the host's libva.so.2
+# libudev.h   LGPL 2.1+ (systemd v259); the header only, for hosts without libudev-dev,
+#             linked against the host's libudev.so.1 (the Pi patch's device scan needs it)
+ffmpeg ffmpeg-7.1.5.tar.xz de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
+ffmpeg-sig ffmpeg-7.1.5.tar.xz.asc - https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz.asc
+ffmpeg-rpi ffmpeg-7.1.5-rpi_29.patch 4178f3c4e1983c38215da8bd85134e1b7ea3e34807718481f927dfebeaa438dd https://raw.githubusercontent.com/RPi-Distro/ffmpeg/2fe08f3bd52c6e795df8353d29deb89596b5099d/debian/patches/ffmpeg-7.1.5-rpi_29.patch
+dav1d dav1d-1.5.4.tar.xz 686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5 https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz
+libopenmpt libopenmpt-0.8.10+release.autotools.tar.gz 976d259288c40cd285771f77d09eff3d02514511d5677ecfcfb53be5013317e2 https://lib.openmpt.org/files/libopenmpt/src/libopenmpt-0.8.10%2Brelease.autotools.tar.gz
+libva libva-2.23.0.tar.gz b10aceb30e93ddf13b2030eb70079574ba437be9b3b76065caf28a72c07e23e7 https://github.com/intel/libva/archive/refs/tags/2.23.0.tar.gz
+libudev libudev-v259.h 836a864c7d45945b8d6c94bb3b79590f785c28562cd510e4328b7161b11b8a53 https://raw.githubusercontent.com/systemd/systemd/v259/src/libudev/libudev.h
