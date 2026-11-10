@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -382,7 +383,8 @@ static int open_dec(struct dec *d, int idx, int want_hw, int hwonly)
     d->hw_fmt = AV_PIX_FMT_NONE;
     if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
         d->c->get_buffer2 = get_buffer;
-        int nc = (int)sysconf(_SC_NPROCESSORS_ONLN);
+        cpu_set_t cs;                                           /* not sysconf: it reads /sys, which the sandbox hides */
+        int nc = sched_getaffinity(0, sizeof cs, &cs) == 0 ? CPU_COUNT(&cs) : 1;
         d->c->thread_count = nc > 8 ? 8 : nc > 0 ? nc : 1;     /* each thread holds frames: keep it bounded */
         if (path == ACM_PATH_HW_VAAPI || path == ACM_PATH_HW_V4L2REQ) {
             d->c->hw_device_ctx = av_buffer_ref(path == ACM_PATH_HW_VAAPI ? hw_vaapi : hw_drm);
