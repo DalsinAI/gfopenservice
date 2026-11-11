@@ -17,7 +17,7 @@ WLIBS   = -Wl,-Bstatic $(shell $(PKG) --libs-only-L $(FFLIBS)) -lavformat -lavco
           -lstdc++ -lm -lpthread
 
 WSRC = src/acm_worker.c src/acm_sandbox.c src/acm_msg.c src/acm_ffmap.c src/acm_tags.c src/acm_caps.c
-BSRC = src/acm_broker.c src/acm_msg.c src/acm_tags.c
+BSRC = src/acm_broker.c src/acm_msg.c src/acm_tags.c src/acm_plane.c
 
 # acm_planetest (M4K step 2: worker dma-bufs on a KMS overlay plane) needs the
 # host's libdrm headers; skipped where there are none
@@ -25,7 +25,7 @@ DRMCF  := $(shell pkg-config --cflags libdrm 2>/dev/null)
 DRMLIB := $(shell pkg-config --libs libdrm 2>/dev/null)
 PLANETEST := $(if $(DRMLIB),$(OUT)/acm_planetest)
 
-all: $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(PLANETEST)
+all: $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(OUT)/acm_plane_test $(PLANETEST)
 
 $(OUT)/acmedia-worker: $(WSRC) src/*.h
 	$(CC) $(WCFLAGS) -o $@ $(WSRC) $(WLIBS)
@@ -36,10 +36,14 @@ $(OUT)/acmedia-worker-test: $(WSRC) src/*.h
 $(OUT)/acm_test: tests/acm_test.c $(BSRC) src/*.h
 	$(CC) $(CFLAGS) -o $@ tests/acm_test.c $(BSRC)
 
+# the plane route against a stand-in acscreen: no worker, FFmpeg or display needed
+$(OUT)/acm_plane_test: tests/acm_plane_test.c $(BSRC) src/*.h
+	$(CC) $(CFLAGS) -pthread -o $@ tests/acm_plane_test.c $(BSRC)
+
 $(OUT)/acm_planetest: tests/acm_planetest.c $(BSRC) src/*.h
 	$(CC) $(CFLAGS) $(DRMCF) -o $@ tests/acm_planetest.c $(BSRC) $(DRMLIB)
 
 clean:
-	rm -f $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(OUT)/acm_planetest
+	rm -f $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(OUT)/acm_plane_test $(OUT)/acm_planetest
 
 .PHONY: all clean

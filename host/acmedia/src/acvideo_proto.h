@@ -29,8 +29,8 @@
  * Fences: none in v1. Decoder capture buffers are complete when the decoder
  * hands them out, and the kernel's implicit dma-buf sync covers the rest.
  *
- * This file is copied into gfopenservice host/acmedia/tests/ for
- * acm_planetest; keep the two the same. Team 6, 11 Nov 2026.
+ * This file is copied into gfopenservice host/acmedia/src/ for the broker
+ * (acm_plane.c); keep the two the same. Team 6, 11 Nov 2026.
  */
 #ifndef ACVIDEO_PROTO_H
 #define ACVIDEO_PROTO_H
