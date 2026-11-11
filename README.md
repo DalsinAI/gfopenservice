@@ -1,12 +1,13 @@
 # gfopenservice: Nursery
 
-**Nursery** is the whole system: `gfopenservice.device` on the Amiga, the
-AutoConfig boards that carry services (the services card, CPU cores), the
+**Nursery** is the whole system: `mitchy.device` on the Amiga, the
+AutoConfig boards that carry services (Mitchy, the services card, and CPU cores), the
 paired Cradles on the LAN, and the services they run. This repository holds
 its Amiga side, the `Nursery` command that lists what is there, and the
 Cradle-side services.
 
-`gfopenservice.device` hands work from an Amiga to a named service, such as
+`mitchy.device` (until 8 November 2026 `gfopenservice.device`, which stays as a
+small device that opens it, for programs built with that name) hands work from an Amiga to a named service, such as
 `opentls.key/1` for TLS key maths, `media.decode/1` and `media.encode/1` for
 datatypes, and `openweb.fetch/1` for HTTP and HTTPS.
 Programs ask by name and do not know where the work runs:
@@ -23,11 +24,12 @@ Programs ask by name and do not know where the work runs:
 
 | Path | What |
 | --- | --- |
-| `include/devices/gfopenservice.h` | The device's API |
-| `src/device.c` | `gfopenservice.device`: boards' rings, LAN connections, one worker process |
+| `include/devices/mitchy.h`, `gfopenservice.h` | The device's name, and its API |
+| `src/alias.c` | `gfopenservice.device`: the old name, opening `mitchy.device` |
+| `src/device.c` | `mitchy.device`: boards' rings, LAN connections, one worker process |
 | `src/mdns.c` | One mDNS question for `_amicradle._tcp.local` |
 | `src/nursery.c` | `Nursery`: lists the boards and the Cradles on the LAN, and their services |
-| `library/mitchy_lib.c`, `include/libraries/mitchy.h` | `mitchy.library`: the services for any program, by name, with no device I/O to write: open, requests waited for or sent (a signal or a message on completion), cancel, the boards (Mitchy, AkikoPlus, the CPU cores board), and a plain "not fitted" answer. On `gfopenservice.device`. Its autodoc is `docs/mitchy.doc`; `sfd/mitchy_lib.sfd` makes `fd/mitchy_lib.fd` and the `clib`, `proto`, `inline` and `pragmas` headers (`library/gen_headers.sh`) |
+| `library/mitchy_lib.c`, `include/libraries/mitchy.h` | `mitchy.library`: the services for any program, by name, with no device I/O to write: open, requests waited for or sent (a signal or a message on completion), cancel, the boards (Mitchy, AkikoPlus, the CPU cores board), and a plain "not fitted" answer. On `gfopenservice.device`, which opens `mitchy.device`. Its autodoc is `docs/mitchy.doc`; `sfd/mitchy_lib.sfd` makes `fd/mitchy_lib.fd` and the `clib`, `proto`, `inline` and `pragmas` headers (`library/gen_headers.sh`) |
 | `src/servicetest.c` | `ServiceTest` 0.2, on `mitchy.library`: the boards, the list, `echo/1` waited for, in parallel by signal and by message, cancelled, too small and badly flagged, and one checked job for each real service on offer; returns 5 when no card or Cradle offers the services |
 | `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1`, `media.decode/1`, `media.encode/1` and `doc.render/1` |
 | `host/opentls_key.c` | `opentls.key/1` on the host (docs/OPENTLS_KEY.md) |
@@ -101,7 +103,7 @@ call goes to the least busy one, so a cluster of Cradles shares the work.
 `./build.sh`, with the os32-gcc16 compiler (`OS32_GCC16`), and `OWFetch`
 with the os32 stove's GCC 6.5 (`OS32`), with the gfopentls and
 gfopendatatypes checkouts beside this one (`OPENTLS`, `ODT`) for their
-headers. Install `gfopenservice.device` in `DEVS:`, `mitchy.library` in `LIBS:`, and for `MEDIA:`
+headers. Install `mitchy.device` and `gfopenservice.device` in `DEVS:`, `mitchy.library` in `LIBS:`, and for `MEDIA:`
 `bin/media-handler` as `L:media-handler` and `devs/MEDIA` in
 `DEVS:DOSDrivers`. The native transport
 undoes compressed bodies when stream.datatype, gzip.datatype and

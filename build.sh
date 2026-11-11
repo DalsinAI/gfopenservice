@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds gfopenservice.device, mitchy.library, Nursery, ServiceTest, ToCDXL and media-handler for AmigaOS 3.x with the
+# Builds mitchy.device (and gfopenservice.device, its old name), mitchy.library, Nursery, ServiceTest, ToCDXL and media-handler for AmigaOS 3.x with the
 # os32-gcc16 compiler (GCC 16.2, libnix), OWFetch with the os32 stove (GCC 6.5),
 # and the host side's libraries: TLS keys, media decoding and encoding, documents and web fetches.
 #   OS32_GCC16  compiler root holding prefix/ (default ~/AmiCradle/stoves/os32-gcc16)
@@ -18,8 +18,11 @@ cd "$HERE"
 for f in start device mdns paired oscrypto osrandom; do
     "$CC" $SOFT -Os -fno-delete-null-pointer-checks -Wall -fomit-frame-pointer -Iinclude -c src/$f.c -o obj/$f.o
 done
-"$CC" -nostartfiles $SOFT -o bin/gfopenservice.device obj/start.o obj/device.o obj/mdns.o obj/paired.o obj/oscrypto.o obj/osrandom.o \
-    -lamiga -Wl,-Map=obj/gfopenservice.device.map
+"$CC" -nostartfiles $SOFT -o bin/mitchy.device obj/start.o obj/device.o obj/mdns.o obj/paired.o obj/oscrypto.o obj/osrandom.o \
+    -lamiga -Wl,-Map=obj/mitchy.device.map
+# The old name: a small device that opens mitchy.device, so programs built with it go on working.
+"$CC" $SOFT -Os -fno-delete-null-pointer-checks -Wall -fomit-frame-pointer -Iinclude -c src/alias.c -o obj/alias.o
+"$CC" -nostartfiles $SOFT -o bin/gfopenservice.device obj/start.o obj/alias.o -lamiga
 # mitchy.library (library/, include/libraries/mitchy.h): bare, no C library
 # or start-up code; mitchy_lib.c's start() and RomTag lead the hunk. Its own
 # memcpy and memset: -fno-tree-loop-distribute-patterns keeps GCC from

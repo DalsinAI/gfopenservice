@@ -1,5 +1,5 @@
 /*
- * gfopenservice.device (devices/gfopenservice.h).
+ * mitchy.device (devices/mitchy.h), which was gfopenservice.device.
  *
  * One worker process does everything: it owns the services card's rings and
  * the LAN connections, so nothing here needs a lock beyond Forbid() around
@@ -32,7 +32,7 @@
 #include <sys/ioctl.h>
 #include <netinet/in.h>
 
-#include "devices/gfopenservice.h"
+#include "devices/mitchy.h"
 #include "openservice.h"
 #include "mdns.h"
 #include "oscrypto.h"
@@ -42,11 +42,11 @@
 #define REG(reg, arg) arg __asm(#reg)
 #endif
 
-const char DevName[] = OPENSERVICE_NAME;
-/* "Version DEVS:gfopenservice.device" reads this; the ROMTag shows the rest. */
-const char DevVersion[] __attribute__((used)) = "$VER: gfopenservice.device 1.1 (6.10.2026)";
+const char DevName[] = MITCHY_NAME;
+/* "Version DEVS:mitchy.device" reads this; the ROMTag shows the rest. */
+const char DevVersion[] __attribute__((used)) = "$VER: mitchy.device 2.0 (8.11.2026)";
 #define DevIdString (DevVersion + 6)
-#define DEV_VERSION 1
+#define DEV_VERSION 2
 #define DEV_REVISION 1
 
 struct ExecBase *SysBase;

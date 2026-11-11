@@ -20,7 +20,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
-#include "devices/gfopenservice.h"
+#include "devices/mitchy.h"
 
 const char HandlerVersion[] __attribute__((used)) = "$VER: media-handler 1.0 (5.11.2026)";
 
@@ -115,7 +115,7 @@ static LONG serviceOpen(void)
         return ERROR_NO_FREE_STORE;
     if (!io && !(io = (struct OSRequest *)CreateIORequest(ioPort, sizeof *io)))
         return ERROR_NO_FREE_STORE;
-    if (OpenDevice((CONST_STRPTR)OPENSERVICE_NAME, 0, (struct IORequest *)io, 0)) {
+    if (OpenDevice((CONST_STRPTR)MITCHY_NAME, 0, (struct IORequest *)io, 0)) {
         io->os_Req.io_Device = NULL;
         return ERROR_NOT_IMPLEMENTED;
     }
