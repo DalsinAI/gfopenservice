@@ -15,6 +15,11 @@
  *                owns, or that has no screen (it still needs a CRTC to test
  *                against, so a connected connector or an active CRTC)
  *   --no-pace    flip as fast as frames come (the plane's top rate)
+ *   --writeback  no monitor needed: drive the card's writeback connector (vc4's
+ *                TXP, where the SoC has one) and read back what the HVS
+ *                composed, primary and overlay, after each flip; it passes
+ *                only if the video's rectangle has a picture in it.
+ *                --dump PATH writes the last one as a PPM
  *   --fps F      pace at F frames a second (default: the stream's rate)
  *   --acscreen S M4K step 3: hand the frames to a running acscreen over its
  *                video socket (amicradle appliance/acscreen/acvideo_proto.h,
@@ -52,7 +57,8 @@
 
 #define MAXF 16384
 static uint8_t buf[ACM_MSG_MAX];
-static int verbose;
+static int verbose, wb_mode;
+static const char *wb_dump;
 
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 static void sleep_until(double t) {
@@ -68,6 +74,8 @@ struct kms {
     uint32_t mode_blob;
     uint32_t dumb_handle, dumb_fb;           /* a black primary plane, so the CRTC has something to scan */
     int modeset_done;
+    uint32_t wb_handle, wb_fb, wb_pitch; size_t wb_size; uint8_t *wb_px;   /* --writeback: where the HVS writes what it composed */
+    int32_t wb_fence;
 };
 static uint32_t prop_id(int fd, uint32_t obj, uint32_t type, const char *name) {
     drmModeObjectProperties *p = drmModeObjectGetProperties(fd, obj, type);
@@ -127,11 +135,15 @@ static int kms_open(struct kms *k, const char *card, int test_only) {
     if (drmSetClientCap(k->fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) || drmSetClientCap(k->fd, DRM_CLIENT_CAP_ATOMIC, 1)) {
         fprintf(stderr, "planetest: the card has no atomic modesetting\n"); return -1;
     }
+    if (wb_mode && drmSetClientCap(k->fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS, 1)) {
+        fprintf(stderr, "planetest: the kernel offers no writeback connectors\n"); return -1;
+    }
     drmModeRes *r = drmModeGetResources(k->fd);
     /* a connected connector, its CRTC (the one in use, else the first its encoders can drive) and its mode */
     for (int i = 0; i < r->count_connectors && !k->conn; i++) {
         drmModeConnector *c = drmModeGetConnector(k->fd, r->connectors[i]);
-        if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes) {
+        int is_wb = c && c->connector_type == DRM_MODE_CONNECTOR_WRITEBACK;
+        if (c && c->connection == DRM_MODE_CONNECTED && c->count_modes && is_wb == wb_mode) {
             uint32_t crtc = 0;
             drmModeEncoder *e = c->encoder_id ? drmModeGetEncoder(k->fd, c->encoder_id) : NULL;
             if (e && e->crtc_id) crtc = e->crtc_id;
@@ -144,7 +156,14 @@ static int kms_open(struct kms *k, const char *card, int test_only) {
             if (crtc) {
                 k->conn = c->connector_id; k->crtc = crtc;
                 drmModeCrtc *cur = drmModeGetCrtc(k->fd, crtc);
-                if (cur && cur->mode_valid) k->mode = cur->mode;          /* keep the mode the screen is in */
+                if (wb_mode) {                                           /* 1920x1080 if it is offered, else the largest up to 1920 wide */
+                    int best = 0;
+                    for (int m = 0; m < c->count_modes; m++) {
+                        if (c->modes[m].hdisplay == 1920 && c->modes[m].vdisplay == 1080) { best = m; break; }
+                        if (c->modes[m].hdisplay <= 1920 && c->modes[m].hdisplay * c->modes[m].vdisplay > c->modes[best].hdisplay * c->modes[best].vdisplay) best = m;
+                    }
+                    k->mode = c->modes[best];
+                } else if (cur && cur->mode_valid) k->mode = cur->mode;   /* keep the mode the screen is in */
                 else { k->mode = c->modes[0]; for (int m = 0; m < c->count_modes; m++) if (c->modes[m].type & DRM_MODE_TYPE_PREFERRED) { k->mode = c->modes[m]; break; } }
                 drmModeFreeCrtc(cur);
             }
@@ -174,8 +193,19 @@ static int kms_open(struct kms *k, const char *card, int test_only) {
         void *m = mmap(NULL, cd.size, PROT_WRITE, MAP_SHARED, k->fd, (off_t)md.offset);
         if (m != MAP_FAILED) { memset(m, 0, cd.size); munmap(m, cd.size); }
     }
-    printf("planetest: card fd %d, connector %u, crtc %u, mode %ux%u@%u, primary plane %u\n",
-           k->fd, k->conn, k->crtc, k->mode.hdisplay, k->mode.vdisplay, k->mode.vrefresh, k->primary);
+    if (wb_mode) {                                   /* the buffer the writeback fills */
+        struct drm_mode_create_dumb wd = { .width = k->mode.hdisplay, .height = k->mode.vdisplay, .bpp = 32 };
+        if (drmIoctl(k->fd, DRM_IOCTL_MODE_CREATE_DUMB, &wd)) { fprintf(stderr, "planetest: writeback buffer: %s\n", strerror(errno)); return -1; }
+        uint32_t wh[4] = { wd.handle }, wp[4] = { wd.pitch }, wo[4] = { 0 };
+        if (drmModeAddFB2(k->fd, wd.width, wd.height, DRM_FORMAT_XRGB8888, wh, wp, wo, &k->wb_fb, 0)) { fprintf(stderr, "planetest: writeback fb: %s\n", strerror(errno)); return -1; }
+        struct drm_mode_map_dumb wm = { .handle = wd.handle };
+        if (drmIoctl(k->fd, DRM_IOCTL_MODE_MAP_DUMB, &wm)) return -1;
+        void *m = mmap(NULL, wd.size, PROT_READ | PROT_WRITE, MAP_SHARED, k->fd, (off_t)wm.offset);
+        if (m == MAP_FAILED) return -1;
+        k->wb_handle = wd.handle; k->wb_pitch = wd.pitch; k->wb_size = wd.size; k->wb_px = m; k->wb_fence = -1;
+    }
+    printf("planetest: card fd %d, %sconnector %u, crtc %u, mode %ux%u@%u, primary plane %u\n",
+           k->fd, wb_mode ? "writeback " : "", k->conn, k->crtc, k->mode.hdisplay, k->mode.vdisplay, k->mode.vrefresh, k->primary);
     return 0;
 }
 /* An overlay plane on our CRTC that takes the frames' format (or the one asked for). */
@@ -261,6 +291,11 @@ static int commit(struct kms *k, uint32_t fb, uint32_t w, uint32_t h, uint32_t f
     ADD(o, DRM_MODE_OBJECT_PLANE, "SRC_W", (uint64_t)w << 16); ADD(o, DRM_MODE_OBJECT_PLANE, "SRC_H", (uint64_t)h << 16);
     ADD(o, DRM_MODE_OBJECT_PLANE, "CRTC_X", x); ADD(o, DRM_MODE_OBJECT_PLANE, "CRTC_Y", y);
     ADD(o, DRM_MODE_OBJECT_PLANE, "CRTC_W", dw); ADD(o, DRM_MODE_OBJECT_PLANE, "CRTC_H", dh);
+    if (k->wb_fb && !(flags & DRM_MODE_ATOMIC_TEST_ONLY)) {   /* capture this frame's composition */
+        k->wb_fence = -1;
+        ADD(k->conn, DRM_MODE_OBJECT_CONNECTOR, "WRITEBACK_FB_ID", k->wb_fb);
+        ADD(k->conn, DRM_MODE_OBJECT_CONNECTOR, "WRITEBACK_OUT_FENCE_PTR", (uint64_t)(uintptr_t)&k->wb_fence);
+    }
     int r = drmModeAtomicCommit(k->fd, req, flags, k);
     drmModeAtomicFree(req);
     if (r) fprintf(stderr, "planetest: atomic commit%s: %s\n", (flags & DRM_MODE_ATOMIC_TEST_ONLY) ? " (test)" : "", strerror(errno));
@@ -281,6 +316,34 @@ static int wait_flip(struct kms *k, int timeout_ms) {
         if (drmHandleEvent(k->fd, &ev)) return -1;
     }
     return 0;
+}
+/* --writeback: wait for the capture, then the share of the video's rectangle that is not black (0..1) */
+static double wb_check(struct kms *k, uint32_t fw, uint32_t fh, int dump) {
+    if (k->wb_fence < 0) return -1;
+    struct pollfd p = { k->wb_fence, POLLIN, 0 };
+    int r = poll(&p, 1, 500);
+    close(k->wb_fence); k->wb_fence = -1;
+    if (r <= 0) return -1;
+    uint32_t x, y, dw, dh; fit(k, fw, fh, &x, &y, &dw, &dh);
+    uint64_t lit = 0, all = 0;
+    for (uint32_t j = y; j < y + dh; j += 4)
+        for (uint32_t i = x; i < x + dw; i += 4) {
+            uint32_t v; memcpy(&v, k->wb_px + (size_t)j * k->wb_pitch + (size_t)i * 4, 4);
+            all++; if ((v & 0xffffff) > 0x101010 && ((v >> 16 & 255) > 16 || (v >> 8 & 255) > 16 || (v & 255) > 16)) lit++;
+        }
+    if (dump && wb_dump) {
+        FILE *f = fopen(wb_dump, "wb");
+        if (f) {
+            fprintf(f, "P6\n%u %u\n255\n", k->mode.hdisplay, k->mode.vdisplay);
+            for (uint32_t j = 0; j < k->mode.vdisplay; j++)
+                for (uint32_t i = 0; i < k->mode.hdisplay; i++) {
+                    uint32_t v; memcpy(&v, k->wb_px + (size_t)j * k->wb_pitch + (size_t)i * 4, 4);
+                    uint8_t rgb[3] = { (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v }; fwrite(rgb, 1, 3, f);
+                }
+            fclose(f);
+        }
+    }
+    return all ? (double)lit / (double)all : 0;
 }
 static double proc_cpu(pid_t pid) {                  /* seconds of CPU a process has used */
     char path[64], line[1024]; snprintf(path, sizeof path, "/proc/%d/stat", (int)pid);
@@ -440,7 +503,7 @@ static int run_acscreen(const char *sock, const char *exe, const char *clip, int
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: acm_planetest WORKER CLIP [--card PATH] [--frames N] [--fps F] [--test-only] [--no-pace] [--plane ID] [--verbose] [--acscreen SOCKET]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: acm_planetest WORKER CLIP [--card PATH] [--frames N] [--fps F] [--test-only] [--writeback [--dump PPM]] [--no-pace] [--plane ID] [--verbose] [--acscreen SOCKET]\n"); return 2; }
     const char *exe = argv[1], *clip = argv[2], *card = NULL, *acscreen = NULL;
     int frames = 300, test_only = 0, pace = 1; double fps = 0; uint32_t want_plane = 0;
     for (int i = 3; i < argc; i++) {
@@ -450,6 +513,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--plane") && i + 1 < argc) want_plane = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--acscreen") && i + 1 < argc) acscreen = argv[++i];
         else if (!strcmp(argv[i], "--test-only")) test_only = 1;
+        else if (!strcmp(argv[i], "--writeback")) wb_mode = 1;
+        else if (!strcmp(argv[i], "--dump") && i + 1 < argc) wb_dump = argv[++i];
         else if (!strcmp(argv[i], "--no-pace")) pace = 0;
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
         else { fprintf(stderr, "planetest: unknown %s\n", argv[i]); return 2; }
@@ -479,7 +544,8 @@ int main(int argc, char **argv) {
     if (fps <= 0) fps = 30;
 
     static double late[MAXF];
-    int shown_n = 0, dropped = 0, notdma = 0, nlate = 0, swframes = 0, pathchg = 0, failed = 0;
+    int shown_n = 0, dropped = 0, notdma = 0, nlate = 0, swframes = 0, pathchg = 0, failed = 0, wb_seen = 0, wb_missing = 0;
+    double wb_best = 0;
     struct shown cur = { 0 }, next = { 0 };
     double t0 = 0, cpu0 = proc_cpu(getpid()), wcpu0 = proc_cpu(w.pid), wall0 = now_s();
     int64_t pts0 = 0;
@@ -519,6 +585,10 @@ int main(int argc, char **argv) {
         if (commit(&k, next.fb, fr.width, fr.height, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT)) { drop_frame(&k, &w, &next); failed = 1; break; }
         if (wait_flip(&k, 1000)) { printf("planetest: no flip event within 1 s\n"); drop_frame(&k, &w, &next); failed = 1; break; }
         if (pace && nlate < MAXF) late[nlate++] = (now_s() - due) * 1000.0;
+        if (wb_mode) {
+            double lit = wb_check(&k, fr.width, fr.height, n == frames - 1);
+            if (lit < 0) wb_missing++; else { wb_seen++; if (lit > wb_best) wb_best = lit; }
+        }
         drop_frame(&k, &w, &cur);                     /* the frame before is off the screen: back to the worker */
         cur = next; memset(&next, 0, sizeof next);
         shown_n++;
@@ -533,7 +603,8 @@ int main(int argc, char **argv) {
            shown_n, test_only ? "tested" : "shown", dropped, notdma, swframes, pathchg, wall, wall > 0 ? shown_n / wall : 0);
     printf("planetest: CPU: this %.1f%% of a core, worker %.1f%%; lateness after due p50 %.2f ms, p99 %.2f ms\n",
            wall > 0 ? 100 * cpu / wall : 0, wall > 0 ? 100 * wcpu / wall : 0, p50, p99);
-    int pass = !failed && shown_n > 0 && !notdma && !swframes;
+    if (wb_mode) printf("planetest: writeback: %d captures, %d missing; the video's rectangle at most %.0f%% lit\n", wb_seen, wb_missing, 100 * wb_best);
+    int pass = !failed && shown_n > 0 && !notdma && !swframes && (!wb_mode || (wb_seen > 0 && wb_best >= 0.25));
     printf("planetest: %s\n", pass ? "PASS zero-copy frames on the overlay plane" : "FAIL (see above)");
     return pass ? 0 : 1;
 }
