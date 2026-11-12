@@ -21,6 +21,9 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 | `src/acm_plane.c`, `src/acvideo_proto.h` | The plane route (design 3.2): dma-buf frames to acscreen's video socket, frames sent back unshown returned for compositing (Team 6; the protocol is amicradle `appliance/acscreen/acvideo_proto.h`) |
 | `tests/acm_plane_test.c` | The plane route against a stand-in acscreen (no worker, FFmpeg or display) |
 | `tests/acm_planetest.c` | M4K step 2: the worker's dma-bufs on a KMS overlay plane (`--test-only`, `--writeback`, `--acscreen`); built where libdrm is |
+| `src/acm_runtime.c` → `libacmedia.so` | M4K step 4: the runtime's backend for the twelve ids (`acmedia_backend_v1`, `src/acmedia_service.h`, a copy of gfosmotherboards'). A worker per session and per probe, frames to acscreen's plane or to ACM_FRAME; no FFmpeg (Team 6) |
+| `src/acm_guest.h` | The guest ABI's numbers as the backend answers them, and the CAPS, INFO and RESULT block layouts (to go into amicradle-guest's `hostlib/acmedia/acmedia.h`) |
+| `tests/acm_runtime_test.c`, `tests/acm_fakeworker.c` | `libacmedia.so` loaded as the runtime loads it, against a stand-in worker (the protocol, made-up frames, no FFmpeg) and a stand-in acscreen |
 | `tests/gen_clips.sh`, `tests/gen_amiga.py`, `tests/clips/` | The test clips (CDXL, ILBM, 8SVX and the module are written by `gen_amiga.py` from the formats' definitions) |
 
 ## Building
@@ -32,6 +35,39 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 The output is in `build/<arch>/`: `acmedia-worker`, `acmedia-worker-test` (the
 same worker with the test hooks: crash, hang, leak, fail the hardware, try to
 escape) and `acm_test`. ARM64 is never built under qemu.
+
+## libacmedia.so, the runtime's backend
+
+a1200native loads `libacmedia.so` before `jit_init` (gfosmotherboards
+`a1200-x86/native/acmedia_event.c`: `$AC_ACMEDIA_DIR`, `openservice/` beside
+the emulator, or this folder's `build/<arch>/` in the dev tree) and calls
+`acmedia_backend_v1(host)`. With no library, or no `acmedia-worker` beside it
+(`AC_ACMEDIA_WORKER` overrides), the ids stay off and akikoplus.device takes
+rung B. The runtime's broker checks the guest's ranges and owns the handles
+and the event queue; the backend gets host pointers and posts events.
+
+- ACM_PROBE and ACM_OPEN get the source as an fd from the runtime (ACFS:
+  opened beneath the unit's share), answer at once, and start a thread that
+  runs the worker; PROBED, OPENED or ERROR follows. Nothing waits for a
+  decoder on the emulation thread.
+- ACM_CONTROL queues PLAY, PAUSE, STOP, SEEK, RATE, SETRECT for the session's
+  thread; EVENTS and VOLUME are kept. Frames are paced by their pts from the
+  moment PLAY lands.
+- PLANE: frames go to acscreen (`$AC_VIDEO_SOCK`) as dma-bufs a frame's time
+  ahead of their vblank. No acscreen, or acscreen turning the plane off: RECT,
+  and the frames go to ACM_FRAME (route GUEST) until the RTG surface (stage c).
+- ACM_FRAME gives the newest due frame once, as YUV420 at its own size; other
+  formats and sizes are ACM_E_FORMAT until stage c.
+- Video only for now: sound comes with ACAHI (M4K step 6). Feeds, the CD,
+  SELECT and TARGET are not in this step.
+- The policy: `AC_ACMEDIA_DENY`, `AC_ACMEDIA_HWONLY` (tags, comma separated),
+  `AC_ACMEDIA_HW=0`. CAPS reports it, and the host's hardware decoders once a
+  worker has said what they are.
+
+`make runtime` builds `libacmedia.so`, `acm_fakeworker`, `acm_runtime_test`
+and `acm_plane_test`, none of which needs FFmpeg:
+
+    make runtime && build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so build/$(uname -m)/acm_fakeworker
 
 ## The worker
 
