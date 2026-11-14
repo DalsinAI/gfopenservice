@@ -6,9 +6,9 @@
  * check passes; the real sandbox is the real worker's, tested by stage a.
  *
  * The source is a text line, "FAKE W H FRAMES FPS [TAG] [crash=K] [slots=N]
- * [hang=K] [audio=1] [soft=1]": a video stream of TAG (default H264), W x H, FRAMES
- * frames at FPS, YUV420P in the pool. audio=1 adds 8 kHz stereo S16. Frame k's
- * Y bytes are (k + y + x) & 255, its U k & 255
+ * [hang=K] [audio=1] [soft=1] [bad=offset|height|pool]": a video stream of
+ * TAG (default H264), W x H, FRAMES frames at FPS, YUV420P in the pool.
+ * audio=1 adds 8 kHz stereo S16. Frame k's Y bytes are (k + y + x) & 255, its U k & 255
  * and its V ~k & 255, so the test can check what ACM_FRAME gave. crash=K
  * dies on the K-th frame (SIGSEGV), hang=K stops answering there. With
  * ACM_WANT_DMABUF the frame goes as a memfd standing in for a dma-buf,
@@ -34,6 +34,7 @@ static int sock = 3, srcfd = -1;
 static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4, has_audio, audio_samples, force_soft;
 static uint8_t *pool; static uint32_t slot_size; static int given[64];
 static uint32_t k, ak;                               /* the next video/audio data */
+static char bad[16];
 static struct acm_info info;
 static int parsed, opened;
 
@@ -55,6 +56,7 @@ static int parse(void) {
     has_audio = strstr(line, "audio=1") != NULL;
     c = strstr(line, "audio_samples="); if (c) audio_samples = (uint32_t)atoi(c + 14);
     force_soft = strstr(line, "soft=1") != NULL;
+    c = strstr(line, "bad="); if (c) sscanf(c + 4, "%15s", bad);
     memset(&info, 0, sizeof info);
     info.container = ACM_TAG('M', 'K', 'V', ' ');
     info.nstreams = has_audio ? 2 : 1;
@@ -116,6 +118,8 @@ static void next(uint32_t want) {
     fr.offset[0] = 0; fr.pitch[0] = W; fr.rowbytes[0] = W; fr.rows[0] = H;
     fr.offset[1] = W * H; fr.pitch[1] = cw; fr.rowbytes[1] = cw; fr.rows[1] = ch;
     fr.offset[2] = W * H + cw * ch; fr.pitch[2] = cw; fr.rowbytes[2] = cw; fr.rows[2] = ch;
+    if (!strcmp(bad, "offset")) fr.offset[1] = slot_size;
+    if (!strcmp(bad, "height")) fr.height = H + 1;
     k++;
     acm_send(sock, ACM_A_FRAME, &fr, sizeof fr, NULL, 0, NULL, 0);
 }
@@ -147,6 +151,7 @@ int main(int argc, char **argv) {
             op.width = W; op.height = H; op.pixfmt = ACM_PIX_YUV420P;
             op.slot_size = (W * H * 3 / 2 + 4095) & ~4095u; op.nslots = op.video < 0 ? 0 : nslots;
             if (op.audio >= 0) { op.sample_rate = 8000; op.channels = 2; }
+            if (!strcmp(bad, "pool")) { op.slot_size = 0x40000000u; op.nslots = 2; }
             op.info = info;
             opened = op.video >= 0 || op.audio >= 0;
             acm_send(sock, ACM_A_OPENED, &op, sizeof op, NULL, 0, NULL, 0);

@@ -30,7 +30,7 @@
 #define OPENWEB_WEBFETCH_H
 
 #include <exec/types.h>
-#include "devices/gfopenservice.h"
+#include "devices/mitchy.h"
 
 #define WF_SERVICE_NAME "openweb.fetch/1"
 

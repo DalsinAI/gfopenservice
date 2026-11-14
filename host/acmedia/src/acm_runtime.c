@@ -75,6 +75,10 @@ uint32_t acm_tag_parse(const char *s);
 #define RT_AUDIO_AHEAD_MS 500         /* bound a buffering guest ahead of due video */
 #define RT_NEXT_MS 10000              /* the watchdog on one frame */
 #define RT_ASK_MS 2000
+#define RT_POOL_MAX (768ull << 20)     /* the worker uses the same total cap */
+#define RT_POOL_SLOTS_MAX 256u
+#define RT_DIM_MAX 16384u
+#define RT_PROBE_TTL_NS (60ull * 1000000000ull)
 
 static void be(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
 static uint32_t rd(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
@@ -139,6 +143,7 @@ struct probe {
     uint32_t gen;
     int32_t err;
     int fd;
+    uint64_t done_ns;
     struct acm_info info;
     struct rt *rt;
 };
@@ -279,7 +284,7 @@ static void *probe_main(void *a) {
     }
     close(p->fd);
     pthread_mutex_lock(&R.mu);
-    p->fd = -1; p->info = info; p->err = r; p->done = 1;
+    p->fd = -1; p->info = info; p->err = r; p->done_ns = now_ns(); p->done = 1;
     uint32_t ticket = p->gen << 8 | (uint32_t)(p - R.probes + 1);
     pthread_mutex_unlock(&R.mu);
     post(0, ACMG_EV_PROBED, ticket, 0);
@@ -293,7 +298,12 @@ static int32_t be_probe(void *ctx, const uint8_t *src, uint32_t srclen, uint8_t 
     if (r) return r;
     pthread_mutex_lock(&R.mu);
     struct probe *p = NULL;
-    for (int i = 0; i < RT_PROBES && !p; i++) if (!R.probes[i].used) p = &R.probes[i];
+    uint64_t now = now_ns();
+    for (int i = 0; i < RT_PROBES; i++) {
+        if (R.probes[i].used && R.probes[i].done && now - R.probes[i].done_ns >= RT_PROBE_TTL_NS)
+            R.probes[i].used = 0;
+        if (!p && !R.probes[i].used) p = &R.probes[i];
+    }
     if (!p) { pthread_mutex_unlock(&R.mu); close(fd); return ACM_E_LIMIT; }
     R.probe_gen = (R.probe_gen + 1) & 0x7fffffu; if (!R.probe_gen) R.probe_gen = 1;
     memset(p, 0, sizeof *p);
@@ -399,7 +409,14 @@ static int sess_open(struct sess *s) {
     s->vpath = gpath(s->op.vpath);
     s->opened = 1;
     pthread_mutex_unlock(&s->mu);
-    if (s->op.nslots && (r = acm_give_pool(&s->w, s->op.slot_size, s->op.nslots))) { note_why(&s->w); return r; }
+    if (s->op.video >= 0 && (!s->op.width || !s->op.height || s->op.width > RT_DIM_MAX || s->op.height > RT_DIM_MAX))
+        return ACM_E_DECODER;
+    if (s->op.nslots) {
+        uint64_t pool_size = (uint64_t)s->op.slot_size * s->op.nslots;
+        if (!s->op.slot_size || s->op.nslots > RT_POOL_SLOTS_MAX || pool_size > RT_POOL_MAX || pool_size > SIZE_MAX)
+            return ACM_E_TOOBIG;
+        if ((r = acm_give_pool(&s->w, s->op.slot_size, s->op.nslots))) { note_why(&s->w); return r; }
+    }
     return 0;
 }
 
@@ -619,7 +636,13 @@ static void step(struct sess *s) {
     if (s->plane && s->pl.on) {
         /* acscreen shows it at its vblank; it gets it a frame's time ahead, and keeps one waiting */
         if (wait_until(s, due > 40000000ull ? due - 40000000ull : 0)) return;
-        while (s->plane && acm_plane_inflight(&s->pl) >= 2) plane_events(s, 20);
+        while (s->plane && acm_plane_inflight(&s->pl) >= 2) {
+            pthread_mutex_lock(&s->mu);
+            int closing = s->closing;
+            pthread_mutex_unlock(&s->mu);
+            if (closing) return;
+            plane_events(s, 20);
+        }
         uint64_t id;
         int r = s->nf.flags & ACM_FF_DMABUF ? acm_plane_send(&s->pl, &s->nf, s->fds, s->nfds, due, &id) :
                                                acm_plane_send_copy(&s->pl, &s->w, &s->nf, due, &id);
@@ -829,6 +852,25 @@ static int32_t be_info(void *ctx, uint32_t slot, uint8_t *out, uint32_t len) {
     return info_block(&in, head, out, len);
 }
 
+static int source_frame_ok(const struct sess *s, const struct acm_frame *f) {
+    if (f->slot >= s->w.nslots || !s->w.pool || !f->width || !f->height ||
+        f->width > s->op.width || f->height > s->op.height)
+        return 0;
+    uint32_t cw = (f->width + 1) / 2, ch = (f->height + 1) / 2;
+    uint32_t np, rb[3], rows[3];
+    if (f->pixfmt == ACM_PIX_YUV420P) {
+        np = 3; rb[0] = f->width; rb[1] = rb[2] = cw; rows[0] = f->height; rows[1] = rows[2] = ch;
+    } else if (f->pixfmt == ACM_PIX_NV12) {
+        np = 2; rb[0] = f->width; rb[1] = 2 * cw; rows[0] = f->height; rows[1] = ch;
+    } else return 0;
+    if (f->nplanes < np) return 0;
+    for (uint32_t p = 0; p < np; p++) {
+        uint64_t end = (uint64_t)f->offset[p] + (uint64_t)(rows[p] - 1) * f->pitch[p] + rb[p];
+        if (!f->pitch[p] || rb[p] > f->pitch[p] || end > s->w.slot_size) return 0;
+    }
+    return 1;
+}
+
 static int32_t be_frame(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, uint32_t pitch, uint32_t format, uint32_t w, uint32_t h) {
     (void)ctx;
     struct sess *s = get(slot);
@@ -842,28 +884,29 @@ static int32_t be_frame(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, ui
     else if (!s->ready || s->taken) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;
     else {
         const struct acm_frame *f = &s->rf;
-        uint32_t fw = f->width, fh = f->height, cw = (fw + 1) / 2, chh = (fh + 1) / 2;
-        if (!pitch) pitch = fw;
-        if ((w && w != fw) || (h && h != fh)) r = ACM_E_FORMAT;   /* no scaling in the core */
-        else if (f->pixfmt != ACM_PIX_YUV420P && f->pixfmt != ACM_PIX_NV12) r = ACM_E_FORMAT;
-        else if (pitch < fw || pitch / 2 < cw) r = ACM_E_BADARG;
-        else if ((uint64_t)pitch * fh + 2ull * (pitch / 2) * chh > len) r = ACM_E_TOOBIG;
-        else if (f->slot >= s->w.nslots || !s->w.pool) r = ACM_E_DECODER;
+        if (!source_frame_ok(s, f)) r = ACM_E_DECODER;
         else {
-            const uint8_t *base = s->w.pool + (size_t)f->slot * s->w.slot_size;
-            uint8_t *u = out + (size_t)pitch * fh, *v = u + (size_t)(pitch / 2) * chh;
-            for (uint32_t y = 0; y < fh; y++) memcpy(out + (size_t)y * pitch, base + f->offset[0] + (size_t)y * f->pitch[0], fw);
-            for (uint32_t y = 0; y < chh; y++) {
-                if (f->pixfmt == ACM_PIX_YUV420P) {
-                    memcpy(u + (size_t)y * (pitch / 2), base + f->offset[1] + (size_t)y * f->pitch[1], cw);
-                    memcpy(v + (size_t)y * (pitch / 2), base + f->offset[2] + (size_t)y * f->pitch[2], cw);
-                } else {
-                    const uint8_t *row = base + f->offset[1] + (size_t)y * f->pitch[1];
-                    for (uint32_t x = 0; x < cw; x++) { u[(size_t)y * (pitch / 2) + x] = row[2 * x]; v[(size_t)y * (pitch / 2) + x] = row[2 * x + 1]; }
+            uint32_t fw = f->width, fh = f->height, cw = (fw + 1) / 2, chh = (fh + 1) / 2;
+            if (!pitch) pitch = fw;
+            if ((w && w != fw) || (h && h != fh)) r = ACM_E_FORMAT;   /* no scaling in the core */
+            else if (pitch < fw || pitch / 2 < cw) r = ACM_E_BADARG;
+            else if ((uint64_t)pitch * fh + 2ull * (pitch / 2) * chh > len) r = ACM_E_TOOBIG;
+            else {
+                const uint8_t *base = s->w.pool + (size_t)f->slot * s->w.slot_size;
+                uint8_t *u = out + (size_t)pitch * fh, *v = u + (size_t)(pitch / 2) * chh;
+                for (uint32_t y = 0; y < fh; y++) memcpy(out + (size_t)y * pitch, base + f->offset[0] + (size_t)y * f->pitch[0], fw);
+                for (uint32_t y = 0; y < chh; y++) {
+                    if (f->pixfmt == ACM_PIX_YUV420P) {
+                        memcpy(u + (size_t)y * (pitch / 2), base + f->offset[1] + (size_t)y * f->pitch[1], cw);
+                        memcpy(v + (size_t)y * (pitch / 2), base + f->offset[2] + (size_t)y * f->pitch[2], cw);
+                    } else {
+                        const uint8_t *row = base + f->offset[1] + (size_t)y * f->pitch[1];
+                        for (uint32_t x = 0; x < cw; x++) { u[(size_t)y * (pitch / 2) + x] = row[2 * x]; v[(size_t)y * (pitch / 2) + x] = row[2 * x + 1]; }
+                    }
                 }
+                s->taken = 1;
+                r = (int32_t)(f->pts_ms < 0 ? 0 : f->pts_ms > 0x7fffffff ? 0x7fffffff : f->pts_ms);
             }
-            s->taken = 1;
-            r = (int32_t)(f->pts_ms < 0 ? 0 : f->pts_ms > 0x7fffffff ? 0x7fffffff : f->pts_ms);
         }
     }
     pthread_mutex_unlock(&s->mu);

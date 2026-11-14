@@ -138,7 +138,7 @@ static LONG open_service(struct wf_service *s)
         wf_service_close(s);
         return OSERR_HOST;
     }
-    if (OpenDevice((CONST_STRPTR)OPENSERVICE_NAME, 0, (struct IORequest *)s->io, 0)) {
+    if (OpenDevice((CONST_STRPTR)MITCHY_NAME, 0, (struct IORequest *)s->io, 0)) {
         DeleteIORequest((struct IORequest *)s->io);
         s->io = NULL;
         wf_service_close(s);

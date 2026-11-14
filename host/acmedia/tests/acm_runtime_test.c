@@ -382,6 +382,9 @@ int main(int argc, char **argv) {
     file("av.fake", "FAKE 64 48 10 25 audio=1\n");
     file("av-unread.fake", "FAKE 64 48 25 25 audio=1\n");
     file("av-tail.fake", "FAKE 64 48 4 25 audio=1 audio_samples=6400\n");
+    file("bad-offset.fake", "FAKE 64 48 2 25 bad=offset\n");
+    file("bad-height.fake", "FAKE 64 48 2 25 bad=height\n");
+    file("bad-pool.fake", "FAKE 64 48 2 25 bad=pool\n");
     uint8_t d[256], out[4096];
     int from = 0;
     struct ev e;
@@ -567,6 +570,27 @@ int main(int argc, char **argv) {
     CHECK(pts >= 0 && frame_ok(fb, 34, 18, 40, (uint32_t)pts / 20), "FRAME at pitch 40 of a 34x18 film (pts %d)", pts);
     B->close(B->ctx, 2);
 
+    /* a sandboxed worker is untrusted: its pool request and frame geometry are bounded here */
+    from = nev_now();
+    h = opened(2, 40, "bad-offset.fake", gtarget, ACMG_OF_EVENTS_FRAME, &r);
+    CHECK(wait_ev(h, ACMG_EV_OPENED, &from, 5000, &e) >= 0 && B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0
+          && wait_ev(h, ACMG_EV_FRAME, &from, 3000, &e) >= 0
+          && B->frame(B->ctx, 2, fb, sizeof fb, 64, ACMG_PIX_YUV420, 0, 0) == ACM_E_DECODER,
+          "FRAME rejects a worker offset beyond its pool");
+    B->close(B->ctx, 2);
+    from = nev_now();
+    h = opened(2, 41, "bad-height.fake", gtarget, ACMG_OF_EVENTS_FRAME, &r);
+    CHECK(wait_ev(h, ACMG_EV_OPENED, &from, 5000, &e) >= 0 && B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0
+          && wait_ev(h, ACMG_EV_FRAME, &from, 3000, &e) >= 0
+          && B->frame(B->ctx, 2, fb, sizeof fb, 64, ACMG_PIX_YUV420, 0, 0) == ACM_E_DECODER,
+          "FRAME rejects worker dimensions beyond OPENED");
+    B->close(B->ctx, 2);
+    from = nev_now();
+    h = opened(2, 42, "bad-pool.fake", gtarget, 0, &r);
+    CHECK(r == ACM_PENDING && wait_ev(h, ACMG_EV_ERROR, &from, 5000, &e) >= 0 && (int32_t)e.a == ACM_E_TOOBIG,
+          "OPEN rejects a worker pool above the runtime cap");
+    B->close(B->ctx, 2);
+
     /* a worker that crashes */
     from = nev_now();
     h = opened(3, 5, "crash.fake", gtarget, 0, &r);
@@ -578,7 +602,8 @@ int main(int argc, char **argv) {
           "and every call after: ACM_E_DECODER");
     char line[256] = { 0 };
     int32_t fl = B->fault(B->ctx, ACM_E_DECODER, (uint8_t *)line, sizeof line);
-    CHECK(fl > 0 && strstr(line, "signal 11"), "FAULT: the line says why (%s)", line);
+    CHECK(fl > 0 && (strstr(line, "signal 11") || (getenv("ASAN_OPTIONS") && strstr(line, "exited (1)"))),
+          "FAULT: the line says why (%s)", line);
     CHECK(B->fault(B->ctx, ACM_E_DENIED, (uint8_t *)line, sizeof line) > 0 && strstr(line, "policy"), "FAULT: a deny's reason");
     CHECK(B->fault(B->ctx, ACM_E_EOF, (uint8_t *)line, sizeof line) == 0, "FAULT: else the broker's own line");
     B->close(B->ctx, 3);
