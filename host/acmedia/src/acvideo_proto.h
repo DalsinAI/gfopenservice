@@ -11,6 +11,9 @@
  *
  * Each packet: struct acv_hdr, then the body named by type (len bytes).
  * ACV_FRAME carries its nobj dma-buf fds with SCM_RIGHTS, in object order.
+ * ACV_COPY carries one sealed source-pool fd. acscreen copies the named
+ * visible plane rows into a linear scanout buffer that it owns; the source
+ * slot may be reused only after DONE, exactly like a dma-buf frame.
  *
  * The client says HELLO and gets WELCOME (the monitor, the RTG screen, and
  * whether the plane can be used now). It sends RECT for where the video goes,
@@ -46,6 +49,7 @@ enum {
     ACV_RECT = 2,           /* struct acv_rect: where the video goes, and whether it is visible */
     ACV_FRAME = 3,          /* struct acv_frame + nobj fds */
     ACV_HIDE = 4,           /* no body: take the plane off (frames on it come back DONE/hidden) */
+    ACV_COPY = 5,           /* struct acv_copy + one sealed source-pool fd */
     ACV_WELCOME = 0x81,     /* struct acv_welcome */
     ACV_SHOWN = 0x82,       /* struct acv_shown */
     ACV_DONE = 0x83,        /* struct acv_done */
@@ -67,6 +71,18 @@ struct acv_frame {
     uint32_t obj[ACV_MAX_OBJ], offset[ACV_MAX_OBJ], pitch[ACV_MAX_OBJ];   /* per plane: its object, offset, pitch */
 };
 
+/* A software-decoded frame in the worker's sealed pool. offset is from the
+ * beginning of the pool fd (it already includes the slot base). Only the
+ * visible rowbytes of each row are copied; source padding stays private.
+ * The currently supported linear scanout formats are NV12 and YUV420. */
+struct acv_copy {
+    uint64_t id;
+    uint64_t due_ns;
+    uint32_t width, height, fourcc, nplanes;
+    uint32_t offset[ACV_MAX_OBJ], pitch[ACV_MAX_OBJ];
+    uint32_t rowbytes[ACV_MAX_OBJ], rows[ACV_MAX_OBJ];
+};
+
 /* why the plane is not in use (STATE), or why a frame came back (DONE) */
 enum {
     ACV_W_OK = 0,           /* STATE: the plane is usable / DONE: replaced on the screen by the next frame */
@@ -80,6 +96,7 @@ enum {
 };
 
 struct acv_welcome { uint32_t version, flags, mon_w, mon_h, refresh_mhz, rtg_w, rtg_h, on_plane, why, pad; };
+#define ACV_WF_COPY 1u       /* ACV_COPY is understood and every one receives DONE */
 struct acv_shown { uint64_t id, vblank_ns; uint32_t seq, pad; };
 struct acv_done { uint64_t id; uint32_t why, err; };
 struct acv_state { uint32_t on_plane, why, mon_w, mon_h; };

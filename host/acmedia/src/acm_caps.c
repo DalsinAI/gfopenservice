@@ -15,7 +15,7 @@
 #include <sys/ioctl.h>
 #include <linux/videodev2.h>
 #include <libavutil/hwcontext.h>
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(ACM_NO_VAAPI_CAPS)
 #include <va/va.h>
 #include <libavutil/hwcontext_vaapi.h>
 #endif
@@ -123,7 +123,7 @@ void acm_caps_fill(struct acm_caps *c, uint32_t paths, AVBufferRef *vaapi)
 {
     memset(c, 0, sizeof *c);
     if (paths & (ACM_PATH_HW_V4L2REQ | ACM_PATH_HW_V4L2M2M)) each_v4l2(fill_cb, c);
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(ACM_NO_VAAPI_CAPS)
     if (vaapi) {
         VADisplay dpy = ((AVVAAPIDeviceContext *)((AVHWDeviceContext *)vaapi->data)->hwctx)->display;
         int n = vaMaxNumProfiles(dpy);
