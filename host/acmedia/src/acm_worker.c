@@ -17,8 +17,9 @@
  * hardware decoder that fails mid-stream is replaced by the software one at
  * the last keyframe, and the broker only sees ACM_FF_PATH on a frame.
  *
- * MIT, Copyright (c) 2026 AmiCradle Team. FFmpeg is LGPL 2.1+ and linked
- * statically; see README.md for the sources and how to relink.
+ * MIT, Copyright (c) 2026 AmiCradle Team. The worker may link the host's
+ * FFmpeg dynamically or the pinned card build; it prints that library's
+ * licence and configuration at start. See README.md for distribution terms.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -888,6 +889,8 @@ int main(int argc, char **argv)
         else { fprintf(stderr, "usage: acmedia-worker [--fd N] [--hw] [--mem MB] [--trap]\n"); return 2; }
     }
     if (setpriority(PRIO_PROCESS, 0, 5)) { /* a busy host: stay behind the Amiga */ }
+    fprintf(stderr, "acmedia-worker: FFmpeg licence: %s\n", avcodec_license());
+    fprintf(stderr, "acmedia-worker: FFmpeg configuration: %s\n", avformat_configuration());
     av_log_set_level(AV_LOG_QUIET);
     if (hw) open_hw_devices();
     struct acm_ready rd = { ACM_PROTO_VERSION, 0, hw_paths, 0 };

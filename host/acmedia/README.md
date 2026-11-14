@@ -11,7 +11,7 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 |---|---|
 | `PINS`, `fetch.sh` | The pinned sources, each checked by sha256 (and FFmpeg's GPG signature): FFmpeg 7.1.5, Raspberry Pi's `ffmpeg-7.1.5-rpi_29.patch`, dav1d 1.5.4, libopenmpt 0.8.10, libva 2.23.0's headers (x86-64), libudev.h from systemd v259 (for hosts without libudev-dev) |
 | `codecs.list` | Everything FFmpeg is built with: about 80 decoders, the demuxers, parsers and bitstream filters, and the hardware decoders per architecture. Nothing else is enabled |
-| `build.sh` | dav1d, libopenmpt, then FFmpeg (static, LGPL only: it refuses a GPL, version 3 or nonfree configuration), then `make` |
+| `build.sh` | dav1d, libopenmpt, then the pinned FFmpeg card build (static; LGPL normally, GPL-2.0 when Raspberry Pi's HEVC compatibility objects are selected), then `make` |
 | `src/acm_worker.c` | `acmedia-worker`: one session, one process |
 | `src/acm_sandbox.c` | The worker's lock-down, applied before it reads its first message |
 | `src/acm_caps.c` | The capability probe: V4L2 memory-to-memory decoders and VAAPI profiles |

@@ -311,6 +311,7 @@ int main(int argc, char **argv) {
     file("crash.fake", "FAKE 32 16 20 25 crash=3\n");
     file("long.fake", "FAKE 64 48 100 25\n");
     file("av.fake", "FAKE 64 48 10 25 audio=1\n");
+    file("av-unread.fake", "FAKE 64 48 25 25 audio=1\n");
     uint8_t d[256], out[4096];
     int from = 0;
     struct ev e;
@@ -435,9 +436,20 @@ int main(int argc, char **argv) {
           out[4] == 0 && out[5] == 1 && out[6] == 0 && out[7] == 1,
           "AUDIO: 512 paired S16BE stereo bytes (%d; %02x%02x/%02x%02x,%02x%02x/%02x%02x)",
           abytes, out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]);
+    usleep(100000);
+    int burst = 0;
+    while (B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 8000) > 0) burst++;
+    CHECK(burst >= 4, "AUDIO: independent clock queues a burst while video waits (%d blocks)", burst);
     CHECK(wait_ev(0x102, ACMG_EV_FRAME, &from, 3000, &e) >= 0, "A/V video frame event");
     pts = B->frame(B->ctx, 2, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48);
     CHECK(pts >= 0 && frame_ok(fb, 64, 48, 64, (uint32_t)pts / 40), "A/V FRAME: decoded video at PTS %d", pts);
+    B->close(B->ctx, 2);
+    from = nev_now();
+    an = srcd(d, "av-unread.fake");
+    r = B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_VIDEO | ACMG_ST_AUDIO, gtarget, atarget, 0, 0);
+    CHECK(r == ACM_PENDING && wait_ev(0x102, ACMG_EV_OPENED, &from, 5000, &e) >= 0 &&
+          B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0 && wait_ev(0x102, ACMG_EV_END, &from, 3000, &e) >= 0,
+          "A/V END is independent of whether the guest reads audio");
     B->close(B->ctx, 2);
     uint8_t ahi[32] = { 0 }; be(ahi, ACMG_OUT_ACAHI);
     CHECK(B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_AUDIO, NULL, ahi, 0, 0) == ACM_E_FORMAT, "direct ACAHI route is not claimed");

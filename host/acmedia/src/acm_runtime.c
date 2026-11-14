@@ -68,6 +68,7 @@ uint32_t acm_tag_parse(const char *s);
 
 #define RT_PROBES 16
 #define RT_QUEUE 16
+#define RT_AUDIO_QUEUE 8             /* about 170 ms at the worker's usual 1024/48 kHz blocks */
 #define RT_NEXT_MS 10000              /* the watchdog on one frame */
 #define RT_ASK_MS 2000
 
@@ -83,6 +84,12 @@ static uint32_t gpath(uint32_t p) {
 
 enum { C_PLAY = 1, C_PAUSE, C_STOP, C_SEEK, C_RATE, C_RECT };
 struct cmd { int k; int64_t a; uint32_t b; };
+
+struct audio_block {
+    struct acm_audio a;
+    uint32_t bytes;
+    uint8_t data[ACM_MSG_MAX - sizeof(struct acm_audio)];
+};
 
 struct rt;
 struct sess {
@@ -105,10 +112,8 @@ struct sess {
     uint32_t vpath, rate, volume, evmask;
     int ready, taken;                /* the newest frame for ACM_FRAME, and whether it was read */
     struct acm_frame rf;
-    int aready;                      /* one PCM block for ACM_AUDIO */
-    struct acm_audio ra;
-    uint32_t abytes;
-    uint8_t abuf[ACM_MSG_MAX - sizeof(struct acm_audio)];
+    struct audio_block aq[RT_AUDIO_QUEUE]; /* PCM runs on its own clock, not one block per video frame */
+    int aqh, aqn;
     /* the thread's own */
     struct acm_worker w;
     struct acm_plane pl;
@@ -420,7 +425,7 @@ static void seek_to(struct sess *s, int64_t ms, uint32_t flags) {
     if (!r && t != ACM_A_OK) r = acm_err(t, buf, ACM_E_IO);
     s->based = 0;
     pthread_mutex_lock(&s->mu);
-    s->aready = 0;
+    s->aqh = s->aqn = 0;
     s->veof = s->aeof = 0;
     if (!r) { s->pos_ms = ms; if (s->state == ACM_STATE_ENDED) s->state = ACM_STATE_PAUSED; }
     int dead = s->w.dead;
@@ -456,6 +461,8 @@ static void run_cmd(struct sess *s, struct cmd c) {
 
 /* Until t (CLOCK_MONOTONIC ns), still playing, nothing queued: 0 when it came, 1 when something else did.
  * With a plane, acscreen's packets are read meanwhile. */
+static int step_audio(struct sess *s);
+
 static int wait_until(struct sess *s, uint64_t t) {
     for (;;) {
         pthread_mutex_lock(&s->mu);
@@ -463,11 +470,20 @@ static int wait_until(struct sess *s, uint64_t t) {
         uint64_t n = now_ns();
         if (stop || n >= t) { pthread_mutex_unlock(&s->mu); return stop; }
         uint64_t left = t - n, slice = left < 10000000ull ? left : 10000000ull;
+        pthread_mutex_unlock(&s->mu);
+        int ar = step_audio(s);      /* keep several audio blocks ready while the video waits for its PTS */
+        if (ar) {
+            note_why(&s->w);
+            set_state(s, ACM_STATE_ERROR, ar);
+            post(s->handle, ACMG_EV_ERROR, (uint32_t)ar, 0);
+            return 1;
+        }
         if (s->plane) {
-            pthread_mutex_unlock(&s->mu);
             plane_events(s, (int)(slice / 1000000ull) + 1);
             continue;
         }
+        pthread_mutex_lock(&s->mu);
+        if (s->closing || s->qn || s->state != ACM_STATE_PLAYING) { pthread_mutex_unlock(&s->mu); return 1; }
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_nsec += (long)slice;
@@ -484,7 +500,13 @@ static int wait_until(struct sess *s, uint64_t t) {
  * events, while ACM_AUDIO returns the copied byte count. */
 static int step_audio(struct sess *s) {
     pthread_mutex_lock(&s->mu);
-    int need = s->op.audio >= 0 && !s->aready && !s->aeof;
+    /* Once video has ended, unread sound must not hold END forever. Drop the
+     * oldest queued block and continue draining the worker to its own EOF. */
+    if (s->veof && s->aqn == RT_AUDIO_QUEUE) {
+        s->aqh = (s->aqh + 1) % RT_AUDIO_QUEUE;
+        s->aqn--;
+    }
+    int need = s->op.audio >= 0 && s->aqn < RT_AUDIO_QUEUE && !s->aeof;
     pthread_mutex_unlock(&s->mu);
     if (!need) return 0;
     static __thread uint8_t buf[ACM_MSG_MAX];
@@ -498,19 +520,20 @@ static int step_audio(struct sess *s) {
     struct acm_audio a;
     memcpy(&a, buf, sizeof a);
     uint64_t bytes = (uint64_t)a.frames * a.channels * 2;
-    if (!a.frames || !a.sample_rate || a.channels != 2 || bytes > sizeof s->abuf || len != sizeof a + bytes) return ACM_E_DECODER;
+    if (!a.frames || !a.sample_rate || a.channels != 2 || bytes > sizeof s->aq[0].data || len != sizeof a + bytes) return ACM_E_DECODER;
     pthread_mutex_lock(&s->mu);
-    s->ra = a;
-    s->abytes = (uint32_t)bytes;
-    memcpy(s->abuf, buf + sizeof a, (size_t)bytes);
-    s->aready = 1;
+    struct audio_block *q = &s->aq[(s->aqh + s->aqn) % RT_AUDIO_QUEUE];
+    q->a = a;
+    q->bytes = (uint32_t)bytes;
+    memcpy(q->data, buf + sizeof a, (size_t)bytes);
+    s->aqn++;
     pthread_mutex_unlock(&s->mu);
     return 0;
 }
 
 static void finish_if_done(struct sess *s) {
     pthread_mutex_lock(&s->mu);
-    int done = (s->op.video < 0 || s->veof) && (s->op.audio < 0 || (s->aeof && !s->aready));
+    int done = (s->op.video < 0 || s->veof) && (s->op.audio < 0 || s->aeof);
     int64_t pos = s->pos_ms;
     if (done) s->state = ACM_STATE_ENDED;
     pthread_mutex_unlock(&s->mu);
@@ -824,20 +847,21 @@ static int32_t be_audio(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, ui
     int32_t r;
     if (s->state == ACM_STATE_ERROR) r = ACM_E_DECODER;
     else if (s->op.audio < 0 || format != ACMG_SND_S16 || (rate && rate != s->op.sample_rate)) r = ACM_E_FORMAT;
-    else if (!s->aready) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;
-    else if (len < s->abytes) r = ACM_E_TOOBIG;
+    else if (!s->aqn) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;
+    else if (len < s->aq[s->aqh].bytes) r = ACM_E_TOOBIG;
     else {
-        uint32_t bytes = s->abytes;
+        struct audio_block *q = &s->aq[s->aqh];
+        uint32_t bytes = q->bytes;
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
         for (uint32_t i = 0; i < bytes; i += 2) {
-            out[i] = s->abuf[i + 1];
-            out[i + 1] = s->abuf[i];
+            out[i] = q->data[i + 1];
+            out[i + 1] = q->data[i];
         }
 #else
-        memcpy(out, s->abuf, bytes);
+        memcpy(out, q->data, bytes);
 #endif
-        s->aready = 0;
-        s->abytes = 0;
+        s->aqh = (s->aqh + 1) % RT_AUDIO_QUEUE;
+        s->aqn--;
         pthread_cond_signal(&s->cv);
         r = (int32_t)bytes;
     }

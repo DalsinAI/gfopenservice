@@ -11,7 +11,7 @@ CFLAGS += -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initiali
 WCFLAGS = $(CFLAGS) $(shell $(PKG) --cflags $(FFLIBS))
 SYSVA = $(shell pkg-config --exists libva 2>/dev/null && echo 1)
 SYSCFLAGS = $(CFLAGS) $(shell pkg-config --cflags $(FFLIBS)) $(if $(SYSVA),,-DACM_NO_VAAPI_CAPS)
-SYSLIBS = $(shell pkg-config --libs $(FFLIBS)) -lpthread
+SYSLIBS = $(shell pkg-config --libs $(FFLIBS)) $(if $(SYSVA),$(shell pkg-config --libs libva libva-drm)) -lpthread
 # FFmpeg, dav1d and libopenmpt statically; libc, libstdc++ (libopenmpt), libm,
 # libz, libdrm, and libva or libudev from the host
 WLIBS   = -Wl,-Bstatic $(shell $(PKG) --libs-only-L $(FFLIBS)) -lavformat -lavcodec -lswresample -lswscale -lavutil \

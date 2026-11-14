@@ -1,6 +1,6 @@
 #!/bin/sh
-# Builds ACMedia's own FFmpeg (design section 4) for this machine, static, LGPL
-# only, from the pinned sources (PINS, fetch.sh): dav1d, libopenmpt, then
+# Builds ACMedia's pinned card FFmpeg (design section 4) for this machine,
+# static, from the pinned sources (PINS, fetch.sh): dav1d, libopenmpt, then
 # FFmpeg 7.1.5 with Raspberry Pi's rpi_29 patch, configured from codecs.list
 # and nothing else. Then the worker and the tests (Makefile).
 #
@@ -82,7 +82,7 @@ if [ "$ARCH" = aarch64 ] && ! pkg-config --exists libudev 2>/dev/null; then
     shim_pc libudev udev libudev.so.1 259
 fi
 
-# --- FFmpeg 7.1.5 + rpi_29, LGPL, static ---
+# --- FFmpeg 7.1.5 + rpi_29, static; recorded LGPL or GPL-2.0 result ---
 list() {   # kind -> comma list for this arch
     awk -v k="$1" -v a="$ARCH" '!/^#/ && NF==2 && ($1==k || $1==k"-"a) {printf "%s%s", s, $2; s=","}' "$HERE/codecs.list"
 }
