@@ -18,9 +18,10 @@
  * may be opened again at once.
  *
  * What M4K step 4 needs, and what it leaves:
- *   - video only (a silent film first): ACM_ST_AUDIO alone is ACM_E_FORMAT,
- *     with video it is left out (INFO's audio route is NONE); ACM_AUDIO is
- *     ACM_E_FORMAT. Sound comes with ACAHI (step 6).
+ *   - video and sound from the same worker session. ACM_AUDIO returns the
+ *     next timestamped signed-16-bit interleaved block. The Amiga-side
+ *     consumer owns output pacing; stream timestamps are the common A/V
+ *     clock. ACAHI is a later direct-output route.
  *   - targets PLANE, GUEST and NONE. PLANE goes to acscreen's video socket
  *     ($AC_VIDEO_SOCK) as dma-bufs; with no acscreen, or while it says the
  *     plane is off, the frames go to ACM_FRAME instead (route GUEST) and a
@@ -87,7 +88,7 @@ struct sess {
     struct rt *rt;
     uint32_t slot, handle;
     int fd;
-    uint32_t vkind, flags;
+    uint32_t streams, vkind, akind, flags;
     struct acv_rect rect;
     pthread_t th;
     pthread_mutex_t mu;
@@ -103,6 +104,10 @@ struct sess {
     uint32_t vpath, rate, volume, evmask;
     int ready, taken;                /* the newest frame for ACM_FRAME, and whether it was read */
     struct acm_frame rf;
+    int aready;                      /* one timestamped PCM block for ACM_AUDIO */
+    struct acm_audio ra;
+    uint32_t abytes;
+    uint8_t abuf[ACM_MSG_MAX - sizeof(struct acm_audio)];
     /* the thread's own */
     struct acm_worker w;
     struct acm_plane pl;
@@ -113,6 +118,7 @@ struct sess {
     uint64_t base_ns;
     int64_t base_pts;
     int based;
+    int veof, aeof;
 };
 
 struct probe {
@@ -365,7 +371,11 @@ static void plane_events(struct sess *s, int ms) {
 static int sess_open(struct sess *s) {
     int r = spawn(&s->w, s->fd);
     if (r) return r;
-    struct acm_open o = { s->vkind == ACMG_OUT_NONE ? -2 : -1, -2, 0, 0 };
+    struct acm_open o = {
+        (s->streams & ACMG_ST_VIDEO) && s->vkind != ACMG_OUT_NONE ? -1 : -2,
+        (s->streams & ACMG_ST_AUDIO) && s->akind != ACMG_OUT_NONE ? -1 : -2,
+        0, 0
+    };
     uint32_t t, len;
     static __thread uint8_t buf[sizeof(struct acm_opened) + 256];
     r = acm_ask(&s->w, ACM_Q_OPEN, &o, sizeof o, NULL, 0, &t, buf, sizeof buf, &len, NULL, NULL, 15000);
@@ -409,6 +419,8 @@ static void seek_to(struct sess *s, int64_t ms, uint32_t flags) {
     if (!r && t != ACM_A_OK) r = acm_err(t, buf, ACM_E_IO);
     s->based = 0;
     pthread_mutex_lock(&s->mu);
+    s->aready = 0;
+    s->veof = s->aeof = 0;
     if (!r) { s->pos_ms = ms; if (s->state == ACM_STATE_ENDED) s->state = ACM_STATE_PAUSED; }
     int dead = s->w.dead;
     pthread_mutex_unlock(&s->mu);
@@ -465,7 +477,53 @@ static int wait_until(struct sess *s, uint64_t t) {
 }
 
 /* One frame further while playing: get it, wait for its time, show it. */
+/* Fetch one audio block when the guest has consumed the previous one. Video
+ * pacing never waits for the guest's audio copy, but both results retain the
+ * stream PTS so the Amiga-side mixer can keep them on the same clock. */
+static int step_audio(struct sess *s) {
+    pthread_mutex_lock(&s->mu);
+    int need = s->op.audio >= 0 && !s->aready && !s->aeof;
+    pthread_mutex_unlock(&s->mu);
+    if (!need) return 0;
+    static __thread uint8_t buf[ACM_MSG_MAX];
+    uint32_t t, len;
+    int r = acm_ask(&s->w, ACM_Q_NEXT, &(struct acm_next){ ACM_WANT_AUDIO, 0 }, sizeof(struct acm_next), NULL, 0,
+                    &t, buf, sizeof buf, &len, NULL, NULL, RT_NEXT_MS);
+    if (!r && t != ACM_A_AUDIO) r = acm_err(t, buf, ACM_E_DECODER);
+    if (r == ACM_E_EOF) { pthread_mutex_lock(&s->mu); s->aeof = 1; pthread_mutex_unlock(&s->mu); return 0; }
+    if (r) return r;
+    if (len < sizeof(struct acm_audio)) return ACM_E_DECODER;
+    struct acm_audio a;
+    memcpy(&a, buf, sizeof a);
+    uint64_t bytes = (uint64_t)a.frames * a.channels * 2;
+    if (!a.frames || !a.sample_rate || !a.channels || bytes > sizeof s->abuf || len != sizeof a + bytes) return ACM_E_DECODER;
+    pthread_mutex_lock(&s->mu);
+    s->ra = a;
+    s->abytes = (uint32_t)bytes;
+    memcpy(s->abuf, buf + sizeof a, (size_t)bytes);
+    s->aready = 1;
+    pthread_mutex_unlock(&s->mu);
+    return 0;
+}
+
+static void finish_if_done(struct sess *s) {
+    pthread_mutex_lock(&s->mu);
+    int done = (s->op.video < 0 || s->veof) && (s->op.audio < 0 || (s->aeof && !s->aready));
+    int64_t pos = s->pos_ms;
+    if (done) s->state = ACM_STATE_ENDED;
+    pthread_mutex_unlock(&s->mu);
+    if (done) post(s->handle, ACMG_EV_END, (uint32_t)pos, 0);
+}
+
 static void step(struct sess *s) {
+    int ar = step_audio(s);
+    if (ar) {
+        note_why(&s->w);
+        set_state(s, ACM_STATE_ERROR, ar);
+        post(s->handle, ACMG_EV_ERROR, (uint32_t)ar, 0);
+        return;
+    }
+    if (s->op.video < 0 || s->veof) { finish_if_done(s); if (s->state == ACM_STATE_PLAYING) usleep(1000); return; }
     if (!s->have) {
         uint32_t t, len;
         static __thread uint8_t buf[sizeof(struct acm_frame) + 256];
@@ -480,8 +538,8 @@ static void step(struct sess *s) {
         }
         if (r == ACM_E_AGAIN) { plane_events(s, 10); return; }       /* every slot is out: wait for one back */
         if (r == ACM_E_EOF) {
-            set_state(s, ACM_STATE_ENDED, 0);
-            post(s->handle, ACMG_EV_END, (uint32_t)s->pos_ms, 0);
+            pthread_mutex_lock(&s->mu); s->veof = 1; pthread_mutex_unlock(&s->mu);
+            finish_if_done(s);
             return;
         }
         if (r) {
@@ -597,15 +655,17 @@ static struct sess *get(uint32_t slot) {
 
 static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t *src, uint32_t srclen, uint32_t streams,
                        const uint8_t *video, const uint8_t *audio, uint32_t port, uint32_t flags) {
-    (void)ctx; (void)audio; (void)port;
+    (void)ctx; (void)port;
     if (!slot || slot > ACM_SVC_SESSIONS) return ACM_E_BADARG;
-    if (!(streams & ACMG_ST_VIDEO)) return ACM_E_FORMAT;          /* sound comes with ACAHI (M4K step 6) */
+    if (!(streams & (ACMG_ST_VIDEO | ACMG_ST_AUDIO)) || (streams & ~(ACMG_ST_VIDEO | ACMG_ST_AUDIO))) return ACM_E_FORMAT;
     uint32_t vk = video ? rd(video) : ACMG_OUT_NONE;
+    uint32_t ak = audio ? rd(audio) : (streams & ACMG_ST_AUDIO ? ACMG_OUT_GUEST : ACMG_OUT_NONE);
     if (vk == ACMG_OUT_RTG_SURFACE || vk == ACMG_OUT_CHIPSET) return ACM_E_FORMAT;   /* stage c */
     if (vk != ACMG_OUT_NONE && vk != ACMG_OUT_PLANE && vk != ACMG_OUT_GUEST) return ACM_E_BADARG;
+    if (ak != ACMG_OUT_NONE && ak != ACMG_OUT_GUEST) return ak == ACMG_OUT_ACAHI ? ACM_E_FORMAT : ACM_E_BADARG;
     struct sess *s = calloc(1, sizeof *s);
     if (!s) return ACM_E_LIMIT;
-    s->rt = &R; s->slot = slot; s->handle = handle; s->vkind = vk; s->flags = flags; s->fd = -1;
+    s->rt = &R; s->slot = slot; s->handle = handle; s->streams = streams; s->vkind = vk; s->akind = ak; s->flags = flags; s->fd = -1;
     s->rate = 65536; s->volume = 65536; s->state = ACM_STATE_OPENING;
     s->evmask = flags & ACMG_OF_EVENTS_FRAME ? ACMG_EVM(ACMG_EV_FRAME) : 0;
     s->rect.space = ACV_SPACE_RTG; s->rect.visible = 1;
@@ -702,10 +762,10 @@ static int32_t be_info(void *ctx, uint32_t slot, uint8_t *out, uint32_t len) {
     head[ACM_IH_STATE] = (uint32_t)s->state;
     head[ACM_IH_POSITION] = (uint32_t)(s->pos_ms > 0x7fffffff ? 0x7fffffff : s->pos_ms);
     head[ACM_IH_VIDEO] = s->opened ? (uint32_t)s->op.video : (uint32_t)-1;
-    head[ACM_IH_AUDIO] = (uint32_t)-1;
+    head[ACM_IH_AUDIO] = s->opened ? (uint32_t)s->op.audio : (uint32_t)-1;
     head[ACM_IH_VPATH] = s->vpath;
     head[ACM_IH_VROUTE] = (uint32_t)s->vroute;
-    head[ACM_IH_AROUTE] = ACMG_ROUTE_NONE;
+    head[ACM_IH_AROUTE] = s->opened && s->op.audio >= 0 ? ACMG_ROUTE_GUEST : ACMG_ROUTE_NONE;
     head[ACM_IH_SIZE] = (s->op.width & 0xffff) << 16 | (s->op.height & 0xffff);
     head[ACM_IH_ERROR] = (uint32_t)s->err;
     struct acm_info in = s->op.info;
@@ -755,8 +815,24 @@ static int32_t be_frame(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, ui
 }
 
 static int32_t be_audio(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, uint32_t format, uint32_t rate) {
-    (void)ctx; (void)out; (void)len; (void)format; (void)rate;
-    return get(slot) ? ACM_E_FORMAT : ACM_E_NOSUCH;              /* sound: M4K step 6 */
+    (void)ctx;
+    struct sess *s = get(slot);
+    if (!s) return ACM_E_NOSUCH;
+    pthread_mutex_lock(&s->mu);
+    int32_t r;
+    if (s->state == ACM_STATE_ERROR) r = ACM_E_DECODER;
+    else if (s->op.audio < 0 || format != ACMG_SND_S16 || (rate && rate != s->op.sample_rate)) r = ACM_E_FORMAT;
+    else if (!s->aready) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;
+    else if (len < s->abytes) r = ACM_E_TOOBIG;
+    else {
+        memcpy(out, s->abuf, s->abytes);
+        int64_t pts = s->ra.pts_ms;
+        s->aready = 0;
+        pthread_cond_signal(&s->cv);
+        r = (int32_t)(pts < 0 ? 0 : pts > 0x7fffffff ? 0x7fffffff : pts);
+    }
+    pthread_mutex_unlock(&s->mu);
+    return r;
 }
 static int32_t be_feed(void *ctx, uint32_t slot, const uint8_t *in, uint32_t len, uint32_t flags) {
     (void)ctx; (void)in; (void)len; (void)flags;

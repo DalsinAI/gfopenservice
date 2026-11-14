@@ -6,8 +6,9 @@
  * check passes; the real sandbox is the real worker's, tested by stage a.
  *
  * The source is a text line, "FAKE W H FRAMES FPS [TAG] [crash=K] [slots=N]
- * [hang=K]": a video stream of TAG (default H264), W x H, FRAMES frames at FPS,
- * YUV420P in the pool. Frame k's Y bytes are (k + y + x) & 255, its U k & 255
+ * [hang=K] [audio=1]": a video stream of TAG (default H264), W x H, FRAMES
+ * frames at FPS, YUV420P in the pool. audio=1 adds 8 kHz mono S16. Frame k's
+ * Y bytes are (k + y + x) & 255, its U k & 255
  * and its V ~k & 255, so the test can check what ACM_FRAME gave. crash=K
  * dies on the K-th frame (SIGSEGV), hang=K stops answering there. With
  * ACM_WANT_DMABUF the frame goes as a memfd standing in for a dma-buf
@@ -29,9 +30,9 @@
 #include "../src/acm_codecs.h"
 
 static int sock = 3, srcfd = -1;
-static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4;
+static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4, has_audio;
 static uint8_t *pool; static uint32_t slot_size; static int given[64];
-static uint32_t k;                                   /* the next frame */
+static uint32_t k, ak;                               /* the next video/audio data */
 static struct acm_info info;
 static int parsed, opened;
 
@@ -50,12 +51,14 @@ static int parse(void) {
     char *c = strstr(line, "crash="); if (c) crash_at = (uint32_t)atoi(c + 6);
     c = strstr(line, "hang="); if (c) hang_at = (uint32_t)atoi(c + 5);
     c = strstr(line, "slots="); if (c) { nslots = (uint32_t)atoi(c + 6); if (!nslots || nslots > 64) nslots = 4; }
+    has_audio = strstr(line, "audio=1") != NULL;
     memset(&info, 0, sizeof info);
     info.container = ACM_TAG('M', 'K', 'V', ' ');
-    info.nstreams = 1;
+    info.nstreams = has_audio ? 2 : 1;
     info.duration_ms = (int64_t)N * 1000 / fps;
     snprintf(info.container_name, sizeof info.container_name, "fake");
     info.s[0] = (struct acm_stream){ ACM_KIND_VIDEO, tag, 0, W, H, 8, fps, 1, 0, 0, { 'u', 'n', 'd', ' ' } };
+    if (has_audio) info.s[1] = (struct acm_stream){ ACM_KIND_AUDIO, ACM_T_PCM, 0, 0, 0, 16, 0, 0, 8000, 1, { 'u', 'n', 'd', ' ' } };
     parsed = 1;
     return 1;
 }
@@ -69,6 +72,19 @@ static void fill(uint8_t *b, uint32_t f) {
 
 static void next(uint32_t want) {
     if (!opened) { err(ACM_E_BADARG, "nothing open"); return; }
+    if (want & ACM_WANT_AUDIO) {
+        uint32_t total = N * 8000 / fps;
+        if (!has_audio || ak >= total) { err(ACM_E_EOF, "audio end"); return; }
+        uint32_t frames = total - ak < 256 ? total - ak : 256;
+        uint8_t b[sizeof(struct acm_audio) + 512];
+        struct acm_audio a = { (int64_t)ak * 1000 / 8000, frames, 8000, 1, 0 };
+        memcpy(b, &a, sizeof a);
+        int16_t *pcm = (int16_t *)(void *)(b + sizeof a);
+        for (uint32_t i = 0; i < frames; i++) pcm[i] = (int16_t)((ak + i) & 0x7fff);
+        ak += frames;
+        acm_send(sock, ACM_A_AUDIO, b, (uint32_t)(sizeof a + frames * 2), NULL, 0, NULL, 0);
+        return;
+    }
     if (k >= N) { err(ACM_E_EOF, "end"); return; }
     if (crash_at && k + 1 == crash_at) raise(SIGSEGV);
     if (hang_at && k + 1 == hang_at) for (;;) pause();
@@ -121,11 +137,15 @@ int main(int argc, char **argv) {
             const struct acm_open *o = (const void *)rx;
             struct acm_opened op;
             memset(&op, 0, sizeof op);
-            op.video = o->video == -2 ? -1 : 0; op.audio = -1; op.vpath = ACM_PATH_SW;
+            op.video = o->video == -2 ? -1 : 0;
+            op.audio = o->audio == -2 || !has_audio ? -1 : 1;
+            op.vpath = op.video >= 0 ? ACM_PATH_SW : ACM_PATH_NONE;
+            op.apath = op.audio >= 0 ? ACM_PATH_SW : ACM_PATH_NONE;
             op.width = W; op.height = H; op.pixfmt = ACM_PIX_YUV420P;
             op.slot_size = (W * H * 3 / 2 + 4095) & ~4095u; op.nslots = op.video < 0 ? 0 : nslots;
+            if (op.audio >= 0) { op.sample_rate = 8000; op.channels = 1; }
             op.info = info;
-            opened = op.video >= 0;
+            opened = op.video >= 0 || op.audio >= 0;
             acm_send(sock, ACM_A_OPENED, &op, sizeof op, NULL, 0, NULL, 0);
             break;
         }
@@ -151,7 +171,7 @@ int main(int argc, char **argv) {
             int64_t ms = ((const struct acm_seek *)rx)->ms;
             uint32_t f = (uint32_t)(ms * fps / 1000);
             if (f >= N) { err(ACM_E_EOF, "past the end"); break; }
-            k = f; ok(NULL, 0);
+            k = f; ak = (uint32_t)(ms * 8); ok(NULL, 0);
             break;
         }
         case ACM_Q_CAPS: {

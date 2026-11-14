@@ -108,9 +108,20 @@ if ! stamp ffmpeg; then
         --enable-parser="$(list parser)" --enable-bsf="$(list bsf)" \
         --enable-hwaccel="$(list hwaccel)" > "$B/ffmpeg-configure.log" 2>&1) \
         || { tail -20 "$B/ffmpeg-configure.log" >&2; exit 1; }
-    # LGPL only: refuse a configuration that took GPL, version 3 or nonfree
+    # FFmpeg's own licence switches. The Raspberry Pi patch also carries
+    # GPL-2.0 HEVC v1-v3 compatibility headers; CONFIG_V4L2_REQ_HEVC_VX says
+    # whether this ARM build selected those objects. The 14 Nov 2026 build
+    # permits that compatibility path, so report it explicitly
+    # rather than incorrectly calling every ARM result LGPL-only.
     if grep -qE '^CONFIG_(GPL|VERSION3|NONFREE)=yes' "$B/ffmpeg-7.1.5/ffbuild/config.mak"; then
         echo "build: FFmpeg configured GPL, version3 or nonfree: refused" >&2; exit 1
+    fi
+    if grep -q '^CONFIG_V4L2_REQ_HEVC_VX=yes' "$B/ffmpeg-7.1.5/ffbuild/config.mak"; then
+        log "licence: GPL-2.0 HEVC v1-v3 compatibility objects selected"
+        printf '%s\n' GPL-2.0 > "$B/ffmpeg-result-licence"
+    else
+        log "licence: LGPL-2.1-or-later FFmpeg configuration"
+        printf '%s\n' LGPL-2.1-or-later > "$B/ffmpeg-result-licence"
     fi
     (cd "$B/ffmpeg-7.1.5" && make -s -j "$JOBS" >/dev/null && make -s install >/dev/null)
     done_ ffmpeg

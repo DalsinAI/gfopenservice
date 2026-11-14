@@ -28,6 +28,14 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 
 ## Building
 
+The portable worker uses the host's system FFmpeg dynamically. Decoder
+libraries stay host packages; they are not copied into GFOS, a pack or a ROM:
+
+    make system                    # acmedia-worker-system and libacmedia.so
+
+The pinned build remains the Pi hardware-validation build because it carries
+Raspberry Pi's V4L2 request decoder:
+
     sh build.sh                     # x86-64 on daletop, under the DevDrive
     JOBS=3 sh build.sh              # aarch64, natively on the Pi pool:
     tools/pibuild.sh --name acmedia <this folder> -- env JOBS=3 sh build.sh   # (amicradle-teams)
@@ -58,8 +66,9 @@ and the event queue; the backend gets host pointers and posts events.
   and the frames go to ACM_FRAME (route GUEST) until the RTG surface (stage c).
 - ACM_FRAME gives the newest due frame once, as YUV420 at its own size; other
   formats and sizes are ACM_E_FORMAT until stage c.
-- Video only for now: sound comes with ACAHI (M4K step 6). Feeds, the CD,
-  SELECT and TARGET are not in this step.
+- Video and sound use one worker session. ACM_AUDIO returns timestamped,
+  interleaved S16 for the Amiga-side consumer; direct ACAHI output is not
+  claimed by this step. Feeds, the CD, SELECT and TARGET are not in this step.
 - The policy: `AC_ACMEDIA_DENY`, `AC_ACMEDIA_HWONLY` (tags, comma separated),
   `AC_ACMEDIA_HW=0`. CAPS reports it, and the host's hardware decoders once a
   worker has said what they are.
@@ -68,6 +77,12 @@ and the event queue; the backend gets host pointers and posts events.
 and `acm_plane_test`, none of which needs FFmpeg:
 
     make runtime && build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so build/$(uname -m)/acm_fakeworker
+
+The real-file receipt runs the same backend against the real worker and the
+checked-in H.264/AAC clip:
+
+    build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
+        build/$(uname -m)/acmedia-worker-system --real "$PWD/tests/clips/h264-av.mp4"
 
 ## The worker
 
@@ -126,16 +141,26 @@ the stream.
 
 ## Licences
 
-Our code here is MIT, as the rest of gfopenservice. The worker links:
+Our code here is MIT, as the rest of gfopenservice. `make system` dynamically
+links the host's libavformat, libavcodec, libswresample, libswscale and
+libavutil. The host package's build configuration and licence are the receipt
+for that worker; no FFmpeg binary or source is copied into this repository,
+GFOS, a pack or a ROM.
+
+The pinned Pi validation worker links:
 
 - FFmpeg 7.1.5, LGPL 2.1 or later; `build.sh` refuses `--enable-gpl`,
   `--enable-version3` and `--enable-nonfree`;
-- Raspberry Pi's patch to it: its files are MIT, BSD or LGPL; its one GPL
-  file, a checkasm test, is not built;
+- Raspberry Pi's patch to it: most files are MIT, BSD or LGPL. Its HEVC v1-v3
+  compatibility headers and checkasm test are GPL-2.0. `build.sh` records
+  `GPL-2.0` when `CONFIG_V4L2_REQ_HEVC_VX=yes`, otherwise
+  `LGPL-2.1-or-later`, in `ffmpeg-result-licence`;
 - dav1d (BSD-2-Clause) and libopenmpt (BSD-3-Clause);
 - from the host, dynamically: libva and libdrm (MIT), and libudev (LGPL 2.1).
 
-FFmpeg is linked statically. To relink it with another FFmpeg, as LGPL 2.1
+The pinned FFmpeg is linked statically. To relink it with another FFmpeg, as LGPL 2.1
 section 6 allows, build that FFmpeg into `build/<arch>/prefix` and run
 `make`: this folder is the worker's complete source, and `build.sh` is how it
-is made.
+is made. A distributed pinned worker must be accompanied by the corresponding
+FFmpeg and patch source, notices and the relink path; a result that selected
+the GPL compatibility objects is distributed under GPL-2.0 terms.
