@@ -12,6 +12,7 @@ T="$OUT/acm_test"
 C="$HERE/tests/clips"
 fail=0
 run() { echo "== $*"; "$T" "$@" || { echo "FAILED: $*"; fail=$((fail + 1)); }; }
+echo "== test_gen_long_clip.sh"; sh "$HERE/tests/test_gen_long_clip.sh" || { echo "FAILED: test_gen_long_clip.sh"; fail=$((fail + 1)); }
 run caps
 run conformance "$C"
 run policy "$C/h264-small.mkv"
@@ -35,6 +36,14 @@ run fallback "$C/hevc-av.mp4"
 run fallback "$C/h264-av.mp4"
 # the plane route (acm_plane.c) against a stand-in acscreen
 echo "== acm_plane_test"; "$OUT/acm_plane_test" || { echo "FAILED: acm_plane_test"; fail=$((fail + 1)); }
+if [ -x "$OUT/acm_planetest" ]; then
+    echo "== test_planetest_copy.py"
+    python3 "$HERE/tests/test_planetest_copy.py" "$OUT/acm_planetest" "$OUT/acmedia-worker" "$C/h264-av.mp4" || {
+        echo "FAILED: test_planetest_copy.py"; fail=$((fail + 1));
+    }
+else
+    echo "== test_planetest_copy.py: skipped (libdrm/acm_planetest unavailable)"
+fi
 # libacmedia.so, the runtime's backend, against a stand-in worker and acscreen
 echo "== acm_runtime_test"; "$OUT/acm_runtime_test" "$OUT/libacmedia.so" "$OUT/acm_fakeworker" || { echo "FAILED: acm_runtime_test"; fail=$((fail + 1)); }
 echo "run_tests: $fail failed"

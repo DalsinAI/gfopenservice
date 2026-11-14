@@ -421,7 +421,31 @@ static int run_acscreen(const char *sock, const char *exe, const char *clip, int
             if (ty == ACV_SHOWN) shown_ev++;
             else if (ty == ACV_DONE) done_ev++;
             else if (ty == ACV_STATE) state_ev++;
+            if (ty == ACV_STATE) printf("planetest: acscreen: plane %s (%u)\n", pl.on ? "on" : "off", ev.why);
             if (ev.composite) { for (int i = 0; i < ev.nfds; i++) close(ev.fds[i]); acm_plane_release(&w, ev.slot); }
+        }
+        /* A menu takes the overlay plane away. Do not consume the film while
+         * it is away: that used to burn the rest of a 20-second clip in under
+         * a second. Wait for STATE on and move the presentation clock by the
+         * pause, so the first returning frame is paced rather than late. */
+        if (!pl.on) {
+            uint64_t paused_at = mono_ns();
+            printf("planetest: acscreen: waiting for plane to return\n");
+            while (!pl.on && !failed) {
+                int ty = acm_plane_pump(&pl, &w, 30000, &ev);
+                if (ty <= 0) { printf("planetest: acscreen %s while plane was off\n", ty ? "went" : "did not restore the plane within 30 s"); failed = 1; break; }
+                if (ty == ACV_SHOWN) shown_ev++;
+                else if (ty == ACV_DONE) done_ev++;
+                else if (ty == ACV_STATE) {
+                    state_ev++;
+                    printf("planetest: acscreen: plane %s (%u)\n", pl.on ? "on" : "off", ev.why);
+                }
+                if (ev.composite) { for (int i = 0; i < ev.nfds; i++) close(ev.fds[i]); acm_plane_release(&w, ev.slot); }
+            }
+            if (failed) break;
+            uint64_t paused = mono_ns() - paused_at;
+            if (t0) t0 += paused;
+            printf("planetest: acscreen: resumed after %.2f s\n", paused / 1e9);
         }
         int fds[ACM_MAX_FDS], nf = 0;
         uint32_t want = ACM_WANT_VIDEO | (copy ? 0 : ACM_WANT_DMABUF);
