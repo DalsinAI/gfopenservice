@@ -70,6 +70,7 @@ uint32_t acm_tag_parse(const char *s);
 #define RT_ASK_MS 2000
 #define RT_POOL_MAX (768ull << 20)     /* the worker uses the same total cap */
 #define RT_POOL_SLOTS_MAX 256u
+#define RT_DIM_MAX 16384u
 #define RT_PROBE_TTL_NS (60ull * 1000000000ull)
 
 static void be(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
@@ -385,6 +386,8 @@ static int sess_open(struct sess *s) {
     s->vpath = gpath(s->op.vpath);
     s->opened = 1;
     pthread_mutex_unlock(&s->mu);
+    if (s->op.video >= 0 && (!s->op.width || !s->op.height || s->op.width > RT_DIM_MAX || s->op.height > RT_DIM_MAX))
+        return ACM_E_DECODER;
     if (s->op.nslots) {
         uint64_t pool_size = (uint64_t)s->op.slot_size * s->op.nslots;
         if (!s->op.slot_size || s->op.nslots > RT_POOL_SLOTS_MAX || pool_size > RT_POOL_MAX || pool_size > SIZE_MAX)
@@ -733,6 +736,25 @@ static int32_t be_info(void *ctx, uint32_t slot, uint8_t *out, uint32_t len) {
     return info_block(&in, head, out, len);
 }
 
+static int source_frame_ok(const struct sess *s, const struct acm_frame *f) {
+    if (f->slot >= s->w.nslots || !s->w.pool || !f->width || !f->height ||
+        f->width > s->op.width || f->height > s->op.height)
+        return 0;
+    uint32_t cw = (f->width + 1) / 2, ch = (f->height + 1) / 2;
+    uint32_t np, rb[3], rows[3];
+    if (f->pixfmt == ACM_PIX_YUV420P) {
+        np = 3; rb[0] = f->width; rb[1] = rb[2] = cw; rows[0] = f->height; rows[1] = rows[2] = ch;
+    } else if (f->pixfmt == ACM_PIX_NV12) {
+        np = 2; rb[0] = f->width; rb[1] = 2 * cw; rows[0] = f->height; rows[1] = ch;
+    } else return 0;
+    if (f->nplanes < np) return 0;
+    for (uint32_t p = 0; p < np; p++) {
+        uint64_t end = (uint64_t)f->offset[p] + (uint64_t)(rows[p] - 1) * f->pitch[p] + rb[p];
+        if (!f->pitch[p] || rb[p] > f->pitch[p] || end > s->w.slot_size) return 0;
+    }
+    return 1;
+}
+
 static int32_t be_frame(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, uint32_t pitch, uint32_t format, uint32_t w, uint32_t h) {
     (void)ctx;
     struct sess *s = get(slot);
@@ -746,23 +768,13 @@ static int32_t be_frame(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, ui
     else if (!s->ready || s->taken) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;
     else {
         const struct acm_frame *f = &s->rf;
-        uint32_t fw = f->width, fh = f->height, cw = (fw + 1) / 2, chh = (fh + 1) / 2;
-        if (!pitch) pitch = fw;
-        if ((w && w != fw) || (h && h != fh)) r = ACM_E_FORMAT;   /* no scaling in the core */
-        else if (f->pixfmt != ACM_PIX_YUV420P && f->pixfmt != ACM_PIX_NV12) r = ACM_E_FORMAT;
-        else if (pitch < fw || pitch / 2 < cw) r = ACM_E_BADARG;
-        else if ((uint64_t)pitch * fh + 2ull * (pitch / 2) * chh > len) r = ACM_E_TOOBIG;
-        else if (f->slot >= s->w.nslots || !s->w.pool || !fw || !fh || fw > s->op.width || fh > s->op.height) r = ACM_E_DECODER;
+        if (!source_frame_ok(s, f)) r = ACM_E_DECODER;
         else {
-            uint32_t np = f->pixfmt == ACM_PIX_YUV420P ? 3u : 2u;
-            uint32_t rb[3] = { fw, f->pixfmt == ACM_PIX_NV12 ? 2u * cw : cw, cw };
-            uint32_t rows[3] = { fh, chh, chh };
-            int valid = f->nplanes >= np;
-            for (uint32_t p = 0; valid && p < np; p++) {
-                uint64_t end = (uint64_t)f->offset[p] + (uint64_t)(rows[p] - 1) * f->pitch[p] + rb[p];
-                if (!f->pitch[p] || rb[p] > f->pitch[p] || end > s->w.slot_size) valid = 0;
-            }
-            if (!valid) r = ACM_E_DECODER;
+            uint32_t fw = f->width, fh = f->height, cw = (fw + 1) / 2, chh = (fh + 1) / 2;
+            if (!pitch) pitch = fw;
+            if ((w && w != fw) || (h && h != fh)) r = ACM_E_FORMAT;   /* no scaling in the core */
+            else if (pitch < fw || pitch / 2 < cw) r = ACM_E_BADARG;
+            else if ((uint64_t)pitch * fh + 2ull * (pitch / 2) * chh > len) r = ACM_E_TOOBIG;
             else {
                 const uint8_t *base = s->w.pool + (size_t)f->slot * s->w.slot_size;
                 uint8_t *u = out + (size_t)pitch * fh, *v = u + (size_t)(pitch / 2) * chh;
