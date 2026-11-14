@@ -194,7 +194,8 @@ static int frame_ok(const uint8_t *b, uint32_t W, uint32_t H, uint32_t p, uint32
 
 /* The real-file receipt: the dynamically linked worker decodes the checked-in
  * H.264/AAC clip through libacmedia, not through the direct worker harness.
- * The sink proves one timestamped S16 block and one video frame. */
+ * The sink proves one S16 block with a positive byte count and one video
+ * frame. Timing is obtained separately through INFO and events. */
 static int real_file(const char *libpath, const char *worker, const char *clip) {
     char name[512];
     real_mode = 1;
@@ -224,14 +225,14 @@ static int real_file(const char *libpath, const char *worker, const char *clip) 
     if (B->control(B->ctx, 1, ACMG_CTL_PLAY, a4)) { fprintf(stderr, "real: PLAY failed\n"); return 1; }
     uint8_t pcm[ACM_MSG_MAX];
     memset(pcm, 0, sizeof pcm);
-    int32_t apts = ACM_E_AGAIN;
-    for (int tries = 0; tries < 1000 && apts == ACM_E_AGAIN; tries++) {
-        apts = B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 48000);
-        if (apts == ACM_E_AGAIN) usleep(2000);
+    int32_t abytes = ACM_E_AGAIN;
+    for (int tries = 0; tries < 1000 && abytes == ACM_E_AGAIN; tries++) {
+        abytes = B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 48000);
+        if (abytes == ACM_E_AGAIN) usleep(2000);
     }
     int nonzero = 0;
-    for (size_t i = 0; i < sizeof pcm; i++) nonzero |= pcm[i];
-    if (apts < 0 || !nonzero) { fprintf(stderr, "real: no S16 audio (%d)\n", apts); return 1; }
+    if (abytes > 0) for (int32_t i = 0; i < abytes; i++) nonzero |= pcm[i];
+    if (abytes <= 0 || (abytes & 1) || !nonzero) { fprintf(stderr, "real: no S16 audio (%d bytes)\n", abytes); return 1; }
     if (wait_ev(h, ACMG_EV_FRAME, &from, 5000, &e) < 0) { fprintf(stderr, "real: no video event\n"); return 1; }
     uint8_t *frame = malloc(640u * 360u * 2u);
     int32_t vpts = frame ? B->frame(B->ctx, 1, frame, 640u * 360u * 2u, 640, ACMG_PIX_YUV420, 640, 360) : ACM_E_LIMIT;
@@ -240,7 +241,7 @@ static int real_file(const char *libpath, const char *worker, const char *clip) 
     for (size_t i = 0; i < 640u * 360u * 3u / 2u; i++) sum = sum * 33u + frame[i];
     free(frame);
     B->close(B->ctx, 1);
-    printf("acm_runtime_real: PASS video_pts=%d video_checksum=%08x audio_pts=%d audio=48000Hz/S16/mono\n", vpts, sum, apts);
+    printf("acm_runtime_real: PASS video_pts=%d video_checksum=%08x audio_bytes=%d audio=48000Hz/S16/mono\n", vpts, sum, abytes);
     return 0;
 }
 
@@ -421,13 +422,13 @@ int main(int argc, char **argv) {
     CHECK(r == ACM_PENDING && wait_ev(0x102, ACMG_EV_OPENED, &from, 5000, &e) >= 0, "A/V OPENED");
     B->info(B->ctx, 2, out, sizeof out);
     CHECK(rd(out + 4 * ACM_IH_VIDEO) == 0 && rd(out + 4 * ACM_IH_AUDIO) == 1 && rd(out + 4 * ACM_IH_AROUTE) == ACMG_ROUTE_GUEST,
-          "INFO: video and timestamped guest audio");
+          "INFO: video and guest audio; timing is separate from AUDIO");
     a4[0] = 0;
     CHECK(B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0, "A/V PLAY");
-    int32_t apts = ACM_E_AGAIN;
-    for (int tries = 0; tries < 200 && apts == ACM_E_AGAIN; tries++) { apts = B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 8000); if (apts == ACM_E_AGAIN) usleep(5000); }
+    int32_t abytes = ACM_E_AGAIN;
+    for (int tries = 0; tries < 200 && abytes == ACM_E_AGAIN; tries++) { abytes = B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 8000); if (abytes == ACM_E_AGAIN) usleep(5000); }
     const int16_t *pcm = (const int16_t *)(const void *)out;
-    CHECK(apts == 0 && pcm[0] == 0 && pcm[1] == 1, "AUDIO: S16 block at PTS 0 (%d; %d,%d)", apts, pcm[0], pcm[1]);
+    CHECK(abytes == 512 && pcm[0] == 0 && pcm[1] == 1, "AUDIO: 512 S16 bytes (%d; %d,%d)", abytes, pcm[0], pcm[1]);
     CHECK(wait_ev(0x102, ACMG_EV_FRAME, &from, 3000, &e) >= 0, "A/V video frame event");
     pts = B->frame(B->ctx, 2, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48);
     CHECK(pts >= 0 && frame_ok(fb, 64, 48, 64, (uint32_t)pts / 40), "A/V FRAME: decoded video at PTS %d", pts);

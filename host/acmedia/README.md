@@ -66,8 +66,9 @@ and the event queue; the backend gets host pointers and posts events.
   and the frames go to ACM_FRAME (route GUEST) until the RTG surface (stage c).
 - ACM_FRAME gives the newest due frame once, as YUV420 at its own size; other
   formats and sizes are ACM_E_FORMAT until stage c.
-- Video and sound use one worker session. ACM_AUDIO returns timestamped,
-  interleaved S16 for the Amiga-side consumer; direct ACAHI output is not
+- Video and sound use one worker session. ACM_AUDIO copies raw interleaved S16
+  for the Amiga-side consumer and returns the exact byte count; PTS/position is
+  obtained separately through INFO and events. Direct ACAHI output is not
   claimed by this step. Feeds, the CD, SELECT and TARGET are not in this step.
 - The policy: `AC_ACMEDIA_DENY`, `AC_ACMEDIA_HWONLY` (tags, comma separated),
   `AC_ACMEDIA_HW=0`. CAPS reports it, and the host's hardware decoders once a

@@ -18,10 +18,11 @@
  * may be opened again at once.
  *
  * What M4K step 4 needs, and what it leaves:
- *   - video and sound from the same worker session. ACM_AUDIO returns the
- *     next timestamped signed-16-bit interleaved block. The Amiga-side
- *     consumer owns output pacing; stream timestamps are the common A/V
- *     clock. ACAHI is a later direct-output route.
+ *   - video and sound from the same worker session. ACM_AUDIO copies the
+ *     next signed-16-bit interleaved block and returns its byte count, as the
+ *     guest ABI requires. Timing comes separately from INFO and events. The
+ *     Amiga-side consumer owns output pacing; ACAHI is a later direct-output
+ *     route.
  *   - targets PLANE, GUEST and NONE. PLANE goes to acscreen's video socket
  *     ($AC_VIDEO_SOCK) as dma-bufs; with no acscreen, or while it says the
  *     plane is off, the frames go to ACM_FRAME instead (route GUEST) and a
@@ -104,7 +105,7 @@ struct sess {
     uint32_t vpath, rate, volume, evmask;
     int ready, taken;                /* the newest frame for ACM_FRAME, and whether it was read */
     struct acm_frame rf;
-    int aready;                      /* one timestamped PCM block for ACM_AUDIO */
+    int aready;                      /* one PCM block for ACM_AUDIO */
     struct acm_audio ra;
     uint32_t abytes;
     uint8_t abuf[ACM_MSG_MAX - sizeof(struct acm_audio)];
@@ -478,8 +479,9 @@ static int wait_until(struct sess *s, uint64_t t) {
 
 /* One frame further while playing: get it, wait for its time, show it. */
 /* Fetch one audio block when the guest has consumed the previous one. Video
- * pacing never waits for the guest's audio copy, but both results retain the
- * stream PTS so the Amiga-side mixer can keep them on the same clock. */
+ * pacing never waits for the guest's audio copy. The worker's PTS stays with
+ * the block internally; the guest reads timing separately through INFO and
+ * events, while ACM_AUDIO returns the copied byte count. */
 static int step_audio(struct sess *s) {
     pthread_mutex_lock(&s->mu);
     int need = s->op.audio >= 0 && !s->aready && !s->aeof;
@@ -825,11 +827,12 @@ static int32_t be_audio(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, ui
     else if (!s->aready) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;
     else if (len < s->abytes) r = ACM_E_TOOBIG;
     else {
-        memcpy(out, s->abuf, s->abytes);
-        int64_t pts = s->ra.pts_ms;
+        uint32_t bytes = s->abytes;
+        memcpy(out, s->abuf, bytes);
         s->aready = 0;
+        s->abytes = 0;
         pthread_cond_signal(&s->cv);
-        r = (int32_t)(pts < 0 ? 0 : pts > 0x7fffffff ? 0x7fffffff : pts);
+        r = (int32_t)bytes;
     }
     pthread_mutex_unlock(&s->mu);
     return r;

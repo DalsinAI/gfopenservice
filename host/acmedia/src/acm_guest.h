@@ -33,7 +33,8 @@ enum { ACMG_CTL_PLAY = 1, ACMG_CTL_PAUSE, ACMG_CTL_STOP, ACMG_CTL_SEEK, ACMG_CTL
 /* ACM_FRAME formats */
 enum { ACMG_PIX_CHUNKY8 = 1, ACMG_PIX_RGB16, ACMG_PIX_ARGB32, ACMG_PIX_HAM8, ACMG_PIX_PLANAR, ACMG_PIX_YUV420 };
 /* ACM_AUDIO formats. The worker's native result is signed 16-bit,
- * interleaved, in host byte order. */
+ * interleaved, in host byte order. ACM_AUDIO returns the bytes copied;
+ * timing is read separately through ACM_INFO and events. */
 #define ACMG_SND_S16 1u
 /* events */
 enum { ACMG_EV_OPENED = 1, ACMG_EV_PROBED, ACMG_EV_FRAME, ACMG_EV_NEED, ACMG_EV_END, ACMG_EV_ERROR, ACMG_EV_PATH, ACMG_EV_RECT };
