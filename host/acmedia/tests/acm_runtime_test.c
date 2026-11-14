@@ -427,8 +427,8 @@ int main(int argc, char **argv) {
     CHECK(B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0, "A/V PLAY");
     int32_t abytes = ACM_E_AGAIN;
     for (int tries = 0; tries < 200 && abytes == ACM_E_AGAIN; tries++) { abytes = B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 8000); if (abytes == ACM_E_AGAIN) usleep(5000); }
-    const int16_t *pcm = (const int16_t *)(const void *)out;
-    CHECK(abytes == 512 && pcm[0] == 0 && pcm[1] == 1, "AUDIO: 512 S16 bytes (%d; %d,%d)", abytes, pcm[0], pcm[1]);
+    CHECK(abytes == 512 && out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 1,
+          "AUDIO: 512 S16BE bytes (%d; %02x%02x,%02x%02x)", abytes, out[0], out[1], out[2], out[3]);
     CHECK(wait_ev(0x102, ACMG_EV_FRAME, &from, 3000, &e) >= 0, "A/V video frame event");
     pts = B->frame(B->ctx, 2, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48);
     CHECK(pts >= 0 && frame_ok(fb, 64, 48, 64, (uint32_t)pts / 40), "A/V FRAME: decoded video at PTS %d", pts);
