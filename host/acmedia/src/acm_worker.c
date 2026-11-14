@@ -17,8 +17,9 @@
  * hardware decoder that fails mid-stream is replaced by the software one at
  * the last keyframe, and the broker only sees ACM_FF_PATH on a frame.
  *
- * MIT, Copyright (c) 2026 AmiCradle Team. FFmpeg is LGPL 2.1+ and linked
- * statically; see README.md for the sources and how to relink.
+ * MIT, Copyright (c) 2026 AmiCradle Team. The worker may link the host's
+ * FFmpeg dynamically or the pinned card build; it prints that library's
+ * licence and configuration at start. See README.md for distribution terms.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -39,6 +40,7 @@
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_drm.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/avutil.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/channel_layout.h>
 #include <libswresample/swresample.h>
@@ -86,8 +88,12 @@ static struct dec V = { .idx = -1 }, A = { .idx = -1 };
 static AVFrame *pending;          /* the pre-rolled first video frame */
 static SwrContext *swr;
 static uint32_t a_rate, a_ch;
-static AVFrame *aq[64];           /* decoded audio not yet asked for */
-static int aqn;
+#define VIDEO_PACKET_QUEUE 256
+static AVPacket *vq[VIDEO_PACKET_QUEUE]; /* video packets crossed while audio was requested */
+static int vqn;
+#define AUDIO_PACKET_QUEUE 256
+static AVPacket *apq[AUDIO_PACKET_QUEUE]; /* audio packets crossed while video was requested */
+static int apqn;
 
 /* the pool */
 static uint8_t *pool;
@@ -405,10 +411,16 @@ static int open_dec(struct dec *d, int idx, int want_hw, int hwonly)
 /* Reads packets until dec has a frame (0), or the end (ACM_E_EOF), or an error. */
 static int feed(struct dec *want);
 
-static void queue_audio(AVFrame *f)
+static void clear_video_packets(void)
 {
-    if (aqn == 64) { av_frame_free(&aq[0]); memmove(aq, aq + 1, sizeof(aq[0]) * 63); aqn--; }
-    aq[aqn++] = f;
+    for (int i = 0; i < vqn; i++) av_packet_free(&vq[i]);
+    vqn = 0;
+}
+
+static void clear_audio_packets(void)
+{
+    for (int i = 0; i < apqn; i++) av_packet_free(&apq[i]);
+    apqn = 0;
 }
 
 static int receive(struct dec *d, AVFrame *out)
@@ -425,10 +437,36 @@ static int receive(struct dec *d, AVFrame *out)
 
 static int feed(struct dec *want)
 {
+    /* Pulling either stream may cross packets for the other in the demuxer.
+     * Keep those packets in order until their stream asks for them. When a
+     * bounded queue is full, apply back-pressure instead of dropping media
+     * or turning a normal read-ahead into a fatal LIMIT. */
+    if (want == &V && vqn) {
+        int s = avcodec_send_packet(V.c, vq[0]);
+        if (s == AVERROR(EAGAIN)) return 0;
+        AVPacket *p = vq[0];
+        memmove(vq, vq + 1, sizeof(vq[0]) * (size_t)--vqn);
+        av_packet_free(&p);
+        if (s < 0 && s != AVERROR_INVALIDDATA) { last_ff = s; return ff2acm(s); }
+        return 0;
+    }
+    if (want == &A && apqn) {
+        int s = avcodec_send_packet(A.c, apq[0]);
+        if (s == AVERROR(EAGAIN)) return 0;
+        AVPacket *p = apq[0];
+        memmove(apq, apq + 1, sizeof(apq[0]) * (size_t)--apqn);
+        av_packet_free(&p);
+        if (s < 0 && s != AVERROR_INVALIDDATA) { last_ff = s; return ff2acm(s); }
+        return 0;
+    }
     AVPacket *pkt = av_packet_alloc();
     if (!pkt) return ACM_E_LIMIT;
     int r = 0;
     for (;;) {
+        if ((want == &V && apqn == AUDIO_PACKET_QUEUE) || (want == &A && vqn == VIDEO_PACKET_QUEUE)) {
+            r = ACM_E_AGAIN;
+            break;
+        }
         int e = av_read_frame(fmt, pkt);
         if (e == AVERROR_EOF || (e < 0 && avio_feof(fmt->pb))) {
             if (!want->drained) { avcodec_send_packet(want->c, NULL); want->drained = 1; }
@@ -437,12 +475,22 @@ static int feed(struct dec *want)
         if (e < 0) { r = ACM_E_IO; break; }
         struct dec *to = pkt->stream_index == V.idx && V.c ? &V : pkt->stream_index == A.idx && A.c ? &A : NULL;
         if (to) {
-            int s = avcodec_send_packet(to->c, pkt);
-            if (s < 0 && s != AVERROR(EAGAIN) && s != AVERROR_INVALIDDATA && to == want) { av_packet_unref(pkt); last_ff = s; r = ff2acm(s); break; }
-            if (to == &A && want != &A) {                    /* keep the audio decoder drained */
-                AVFrame *f = av_frame_alloc();
-                while (f && avcodec_receive_frame(A.c, f) == 0) { queue_audio(f); f = av_frame_alloc(); }
-                av_frame_free(&f);
+            if (to != want) {
+                if (to == &V) {
+                    if (vqn == VIDEO_PACKET_QUEUE || !(vq[vqn] = av_packet_clone(pkt))) {
+                        r = ACM_E_LIMIT; av_packet_unref(pkt); break;
+                    }
+                    vqn++;
+                } else {
+                    if (apqn == AUDIO_PACKET_QUEUE || !(apq[apqn] = av_packet_clone(pkt))) {
+                        r = ACM_E_LIMIT; av_packet_unref(pkt); break;
+                    }
+                    apqn++;
+                }
+            } else {
+                int s = avcodec_send_packet(to->c, pkt);
+                if (s < 0 && s != AVERROR(EAGAIN) && s != AVERROR_INVALIDDATA) { last_ff = s; r = ff2acm(s); }
+                if (r) { av_packet_unref(pkt); break; }
             }
         }
         av_packet_unref(pkt);
@@ -464,6 +512,8 @@ static int fallback_to_sw(void)
     int r = open_dec(&V, idx, 0, 0);
     if (r) return r;
     if (last != AV_NOPTS_VALUE) {
+        clear_video_packets();
+        clear_audio_packets();
         av_seek_frame(fmt, idx, last, AVSEEK_FLAG_BACKWARD);
         if (A.c) avcodec_flush_buffers(A.c);
         V.skip_until = last;
@@ -583,8 +633,8 @@ static void do_open(const struct acm_open *o)
     }
     if (A.c) {
         a_rate = (uint32_t)A.c->sample_rate;
-        a_ch = A.c->ch_layout.nb_channels >= 2 ? 2 : 1;
-        AVChannelLayout out = a_ch == 2 ? (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO : (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
+        a_ch = 2;                                             /* ACM_PCM_S16BE_STEREO at the guest ABI */
+        AVChannelLayout out = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
         if (swr_alloc_set_opts2(&swr, &out, AV_SAMPLE_FMT_S16, (int)a_rate, &A.c->ch_layout, A.c->sample_fmt,
                                 A.c->sample_rate, 0, NULL) < 0 || swr_init(swr) < 0) {
             reply_error(ACM_E_NOCODEC, 0, "audio conversion");
@@ -593,6 +643,7 @@ static void do_open(const struct acm_open *o)
         op.apath = A.path;
         op.sample_rate = a_rate;
         op.channels = a_ch;
+        if ((uint32_t)A.idx < op.info.nstreams) op.info.s[A.idx].channels = a_ch;
     }
     acm_send(sock, ACM_A_OPENED, &op, sizeof op, NULL, 0, NULL, 0);
 }
@@ -769,13 +820,9 @@ static void do_next_video(uint32_t want)
 static void do_next_audio(void)
 {
     if (!A.c) { reply_error(ACM_E_BADARG, 0, "no audio open"); return; }
-    AVFrame *f;
-    if (aqn) { f = aq[0]; memmove(aq, aq + 1, sizeof(aq[0]) * (size_t)--aqn); }
-    else {
-        f = av_frame_alloc();
-        int r = f ? receive(&A, f) : ACM_E_LIMIT;
-        if (r) { av_frame_free(&f); reply_error(r, 0, NULL); return; }
-    }
+    AVFrame *f = av_frame_alloc();
+    int r = f ? receive(&A, f) : ACM_E_LIMIT;
+    if (r) { av_frame_free(&f); reply_error(r, 0, NULL); return; }
     static int16_t buf[(ACM_MSG_MAX - 256) / 2];
     uint32_t maxf = (uint32_t)(sizeof buf / sizeof buf[0]) / a_ch;
     uint8_t *o[1] = { (uint8_t *)buf };
@@ -818,8 +865,8 @@ static void do_seek(const struct acm_seek *s)
     int64_t ts = s->ms * 1000;
     if (av_seek_frame(fmt, -1, ts, AVSEEK_FLAG_BACKWARD) < 0) { reply_error(ACM_E_EOF, 0, "seek"); return; }
     av_frame_free(&pending);
-    for (int i = 0; i < aqn; i++) av_frame_free(&aq[i]);
-    aqn = 0;
+    clear_video_packets();
+    clear_audio_packets();
     if (V.c) { avcodec_flush_buffers(V.c); V.drained = 0; V.skip_until = AV_NOPTS_VALUE; }
     if (A.c) { avcodec_flush_buffers(A.c); A.drained = 0; }
     if (V.c && (s->flags & 1))                                    /* exact: drop frames before the time */
@@ -887,6 +934,9 @@ int main(int argc, char **argv)
         else { fprintf(stderr, "usage: acmedia-worker [--fd N] [--hw] [--mem MB] [--trap]\n"); return 2; }
     }
     if (setpriority(PRIO_PROCESS, 0, 5)) { /* a busy host: stay behind the Amiga */ }
+    fprintf(stderr, "acmedia-worker: FFmpeg version: %s\n", av_version_info());
+    fprintf(stderr, "acmedia-worker: FFmpeg licence: %s\n", avcodec_license());
+    fprintf(stderr, "acmedia-worker: FFmpeg configuration: %s\n", avformat_configuration());
     av_log_set_level(AV_LOG_QUIET);
     if (hw) open_hw_devices();
     struct acm_ready rd = { ACM_PROTO_VERSION, 0, hw_paths, 0 };

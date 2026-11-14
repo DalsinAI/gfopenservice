@@ -11,14 +11,14 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 |---|---|
 | `PINS`, `fetch.sh` | The pinned sources, each checked by sha256 (and FFmpeg's GPG signature): FFmpeg 7.1.5, Raspberry Pi's `ffmpeg-7.1.5-rpi_29.patch`, dav1d 1.5.4, libopenmpt 0.8.10, libva 2.23.0's headers (x86-64), libudev.h from systemd v259 (for hosts without libudev-dev) |
 | `codecs.list` | Everything FFmpeg is built with: about 80 decoders, the demuxers, parsers and bitstream filters, and the hardware decoders per architecture. Nothing else is enabled |
-| `build.sh` | dav1d, libopenmpt, then FFmpeg (static, LGPL only: it refuses a GPL, version 3 or nonfree configuration), then `make` |
+| `build.sh` | dav1d, libopenmpt, then the pinned FFmpeg card build (static; LGPL normally, GPL-2.0 when Raspberry Pi's HEVC compatibility objects are selected), then `make` |
 | `src/acm_worker.c` | `acmedia-worker`: one session, one process |
 | `src/acm_sandbox.c` | The worker's lock-down, applied before it reads its first message |
 | `src/acm_caps.c` | The capability probe: V4L2 memory-to-memory decoders and VAAPI profiles |
 | `src/acm_broker.c` | The broker's side: start, check the lock-down, ask with a watchdog, give the frame pool. The runtime uses it in stage b |
 | `src/acm_proto.h` | The worker protocol, with ACMedia's error codes and codec tags (`acm_codecs.h`) |
 | `tests/acm_test.c`, `tests/run_tests.sh` | The host test harness |
-| `src/acm_plane.c`, `src/acvideo_proto.h` | The plane route (design 3.2): dma-buf frames to acscreen's video socket, frames sent back unshown returned for compositing (Team 6; the protocol is amicradle `appliance/acscreen/acvideo_proto.h`) |
+| `src/acm_plane.c`, `src/acvideo_proto.h` | The plane route (design 3.2): hardware dma-bufs and software-pool YUV frames to acscreen's video socket; acscreen copies software frames once into its own linear scanout BO (Team 6; the protocol is amicradle `appliance/acscreen/acvideo_proto.h`) |
 | `tests/acm_plane_test.c` | The plane route against a stand-in acscreen (no worker, FFmpeg or display) |
 | `tests/acm_planetest.c` | M4K step 2: the worker's dma-bufs on a KMS overlay plane (`--test-only`, `--writeback`, `--acscreen`); built where libdrm is |
 | `src/acm_runtime.c` → `libacmedia.so` | M4K step 4: the runtime's backend for the twelve ids (`acmedia_backend_v1`, `src/acmedia_service.h`, a copy of gfosmotherboards'). A worker per session and per probe, frames to acscreen's plane or to ACM_FRAME; no FFmpeg (Team 6) |
@@ -27,6 +27,14 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 | `tests/gen_clips.sh`, `tests/gen_amiga.py`, `tests/clips/` | The test clips (CDXL, ILBM, 8SVX and the module are written by `gen_amiga.py` from the formats' definitions) |
 
 ## Building
+
+The portable worker uses the host's system FFmpeg dynamically. Decoder
+libraries stay host packages; they are not copied into GFOS, a pack or a ROM:
+
+    make system                    # acmedia-worker-system and libacmedia.so
+
+The pinned build remains the Pi hardware-validation build because it carries
+Raspberry Pi's V4L2 request decoder:
 
     sh build.sh                     # x86-64 on daletop, under the DevDrive
     JOBS=3 sh build.sh              # aarch64, natively on the Pi pool:
@@ -53,13 +61,24 @@ and the event queue; the backend gets host pointers and posts events.
 - ACM_CONTROL queues PLAY, PAUSE, STOP, SEEK, RATE, SETRECT for the session's
   thread; EVENTS and VOLUME are kept. Frames are paced by their pts from the
   moment PLAY lands.
-- PLANE: frames go to acscreen (`$AC_VIDEO_SOCK`) as dma-bufs a frame's time
+- PLANE: frames go to acscreen (`$AC_VIDEO_SOCK`) as dma-bufs, or from the
+  sealed software pool with one copy into acscreen's linear scanout BO, a frame's time
   ahead of their vblank. No acscreen, or acscreen turning the plane off: RECT,
   and the frames go to ACM_FRAME (route GUEST) until the RTG surface (stage c).
 - ACM_FRAME gives the newest due frame once, as YUV420 at its own size; other
   formats and sizes are ACM_E_FORMAT until stage c.
-- Video only for now: sound comes with ACAHI (M4K step 6). Feeds, the CD,
-  SELECT and TARGET are not in this step.
+- Video and sound use one worker session. The worker converts every source to
+  stereo (including mono upmix). ACM_AUDIO copies raw interleaved big-endian
+  S16 for the Amiga-side consumer and returns the exact byte count. The worker's
+  audio PTS bounds read-ahead against the due video position, but guest ABI v1
+  has no per-block PTS: INFO/events expose the video clock, and an audio-only
+  consumer can only count samples since OPEN or SEEK. That count cannot describe
+  a source timestamp gap; adding the PTS to the guest contract is still required.
+  An active consumer plays
+  audio that continues beyond video EOF, while an unread tail is abandoned
+  after a bounded grace so END cannot hang. Pulling audio ahead queues crossed
+  video packets with bounded back-pressure instead of dropping them. Direct ACAHI output is not claimed
+  by this step. Feeds, the CD, SELECT and TARGET are not in this step.
 - The policy: `AC_ACMEDIA_DENY`, `AC_ACMEDIA_HWONLY` (tags, comma separated),
   `AC_ACMEDIA_HW=0`. CAPS reports it, and the host's hardware decoders once a
   worker has said what they are.
@@ -68,6 +87,17 @@ and the event queue; the backend gets host pointers and posts events.
 and `acm_plane_test`, none of which needs FFmpeg:
 
     make runtime && build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so build/$(uname -m)/acm_fakeworker
+
+The real-file receipt runs the same backend against the real worker and the
+checked-in H.264/AAC clip:
+
+    build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
+        build/$(uname -m)/acmedia-worker-system --real "$PWD/tests/clips/h264-av.mp4"
+
+`acm_test avflow FILE` first counts each stream alone, then verifies the exact
+same frame/sample counts when video and audio alternately fill the bounded
+cross-stream queues. `acm_runtime_test ... --real-flow FILE FRAMES SAMPLES`
+does the matching fast-audio-reader test through the public backend.
 
 ## The worker
 
@@ -114,6 +144,8 @@ the stream.
 
 - the protocol's good and bad requests, and every clip: probe, frames to the
   end, the end twice, seek, the same frames again;
+- audio-first demux preserves every video packet, and the runtime delivers a
+  longer audio tail after video EOF while unread audio still reaches END;
 - the policy: a deny never opens a decoder;
 - crash, hang and leak: each ends as `ACM_E_DECODER` and the next session
   plays;
@@ -126,16 +158,30 @@ the stream.
 
 ## Licences
 
-Our code here is MIT, as the rest of gfopenservice. The worker links:
+Our code here is MIT, as the rest of gfopenservice. `make system` dynamically
+links the FFmpeg version supplied by the supported Debian-family host (Ubuntu
+on the PC build host; Raspberry Pi OS on the card): libavformat, libavcodec,
+libswresample, libswscale and libavutil. With `ACM_VERBOSE=1`, the worker prints
+the loaded FFmpeg version, licence and complete configuration before sandboxing;
+`ffmpeg -version` and `apt-cache policy ffmpeg` name the distribution package.
+Its corresponding source is obtained from that distribution with `apt source
+ffmpeg` (after enabling its source-package repository). No FFmpeg binary or
+source is copied into this repository, GFOS, a pack or a ROM by `make system`.
+
+The pinned Pi validation worker links:
 
 - FFmpeg 7.1.5, LGPL 2.1 or later; `build.sh` refuses `--enable-gpl`,
   `--enable-version3` and `--enable-nonfree`;
-- Raspberry Pi's patch to it: its files are MIT, BSD or LGPL; its one GPL
-  file, a checkasm test, is not built;
+- Raspberry Pi's patch to it: most files are MIT, BSD or LGPL. Its HEVC v1-v3
+  compatibility headers and checkasm test are GPL-2.0. `build.sh` records
+  `GPL-2.0` when `CONFIG_V4L2_REQ_HEVC_VX=yes`, otherwise
+  `LGPL-2.1-or-later`, in `ffmpeg-result-licence`;
 - dav1d (BSD-2-Clause) and libopenmpt (BSD-3-Clause);
 - from the host, dynamically: libva and libdrm (MIT), and libudev (LGPL 2.1).
 
-FFmpeg is linked statically. To relink it with another FFmpeg, as LGPL 2.1
+The pinned FFmpeg is linked statically. To relink it with another FFmpeg, as LGPL 2.1
 section 6 allows, build that FFmpeg into `build/<arch>/prefix` and run
 `make`: this folder is the worker's complete source, and `build.sh` is how it
-is made.
+is made. A distributed pinned worker must be accompanied by the corresponding
+FFmpeg and patch source, notices and the relink path; a result that selected
+the GPL compatibility objects is distributed under GPL-2.0 terms.

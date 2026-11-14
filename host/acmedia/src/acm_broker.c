@@ -101,6 +101,7 @@ int acm_spawn(struct acm_worker *w, const char *exe, int hw, unsigned mem_mb, in
 {
     memset(w, 0, sizeof *w);
     w->sock = -1;
+    w->pool_fd = -1;
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv)) return ACM_E_LIMIT;
     posix_spawn_file_actions_t fa;
@@ -164,8 +165,8 @@ int acm_give_pool(struct acm_worker *w, uint32_t slot_size, uint32_t nslots)
     uint32_t t, len;
     uint8_t buf[256];
     int r = acm_ask(w, ACM_Q_POOL, &p, sizeof p, &fd, 1, &t, buf, sizeof buf, &len, NULL, NULL, 2000);
-    close(fd);
-    if (r || t != ACM_A_OK) { munmap(m, size); return r ? r : acm_err(t, buf, ACM_E_LIMIT); }
+    if (r || t != ACM_A_OK) { close(fd); munmap(m, size); return r ? r : acm_err(t, buf, ACM_E_LIMIT); }
+    w->pool_fd = fd;
     w->pool = m;
     w->pool_size = size;
     w->slot_size = slot_size;
@@ -186,6 +187,8 @@ void acm_end(struct acm_worker *w)
     }
     if (w->sock >= 0) close(w->sock);
     w->sock = -1;
+    if (w->pool_fd >= 0) close(w->pool_fd);
+    w->pool_fd = -1;
     if (w->pool) munmap(w->pool, w->pool_size);
     w->pool = NULL;
     w->dead = 1;
