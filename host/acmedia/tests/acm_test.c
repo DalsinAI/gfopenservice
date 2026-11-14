@@ -10,6 +10,7 @@
  *   acm_test crash FILE                        crash, hang, leak: the broker survives
  *   acm_test sandbox                           what the sandbox must refuse
  *   acm_test fallback FILE                     hardware fails mid-stream: software goes on, same frames
+ *   acm_test avflow FILE                       no A/V loss when either side is read first
  *   acm_test fuzz SEEDDIR N                    N corrupted files through probe, open and decode
  *   acm_test bench FILE [--hw] [--copy] [--dmabuf] [--realtime] [--n N]
  *
@@ -165,6 +166,80 @@ static int next_audio(struct sess *s, int *samples)
     if (len != sizeof *a + a->frames * a->channels * 2) return ACM_E_BADARG;
     *samples += (int)a->frames;
     return 0;
+}
+
+/* Counts each stream alone, then makes video and audio alternately run into
+ * the worker's bounded cross-stream packet queues. ACM_E_AGAIN must apply
+ * back-pressure; it must never become LIMIT/DECODER or discard either side. */
+static int count_video(const char *file, int *frames)
+{
+    struct sess s;
+    int r = sess_open(&s, worker, file, 0, 0, NULL, 1);
+    if (r) return r;
+    struct acm_frame fr;
+    while ((r = next_frame(&s, ACM_WANT_VIDEO, &fr, NULL, 10000)) == 0) (*frames)++;
+    sess_close(&s);
+    return r == ACM_E_EOF ? 0 : r;
+}
+
+static int count_audio(const char *file, int *samples)
+{
+    struct sess s;
+    int r = sess_open(&s, worker, file, 0, 0, NULL, 2);
+    if (r) return r;
+    while ((r = next_audio(&s, samples)) == 0) {}
+    sess_close(&s);
+    return r == ACM_E_EOF ? 0 : r;
+}
+
+static int combined_flow(const char *file, int audio_first, int *frames, int *samples)
+{
+    struct sess s;
+    int r = sess_open(&s, worker, file, 0, 0, NULL, 0);
+    if (r) return r;
+    struct acm_frame fr;
+    int veof = 0, aeof = 0;
+    for (int turns = 0; turns < 1000000 && (!veof || !aeof); turns++) {
+        int take_audio = audio_first ? !aeof : veof;
+        if (take_audio) {
+            r = next_audio(&s, samples);
+            if (r == ACM_E_EOF) aeof = 1;
+            else if (r == ACM_E_AGAIN) take_audio = 0;
+            else if (r) break;
+        }
+        if (!take_audio && !veof) {
+            r = next_frame(&s, ACM_WANT_VIDEO, &fr, NULL, 10000);
+            if (r == ACM_E_EOF) veof = 1;
+            else if (r == ACM_E_AGAIN) {
+                r = next_audio(&s, samples);
+                if (r == ACM_E_EOF) aeof = 1;
+                else if (r && r != ACM_E_AGAIN) break;
+            } else if (r) break;
+            else (*frames)++;
+        } else if (take_audio && !audio_first && !veof) {
+            /* not reached: video-first stays on video until back-pressure */
+        }
+        if (audio_first && aeof && !veof) audio_first = 0;
+        if (!audio_first && veof && !aeof) { /* tail: the next turn drains audio */ }
+        r = 0;
+    }
+    if (!r && (!veof || !aeof)) r = ACM_E_LIMIT;
+    sess_close(&s);
+    return r;
+}
+
+static int cmd_avflow(const char *file)
+{
+    int vf = 0, as = 0, vf_first = 0, as_after = 0, vf_after = 0, as_first = 0;
+    int r = count_video(file, &vf);
+    if (!r) r = count_audio(file, &as);
+    if (!r) r = combined_flow(file, 0, &vf_first, &as_after);
+    if (!r) r = combined_flow(file, 1, &vf_after, &as_first);
+    printf("avflow: baseline %d frames/%d samples; video-first %d/%d; audio-first %d/%d%s\n",
+           vf, as, vf_first, as_after, vf_after, as_first, r ? " FAILED" : "");
+    CHECK(!r && vf > 0 && as > 0 && vf_first == vf && as_after == as && vf_after == vf && as_first == as,
+          "bounded A/V flow lost media or failed (%d)", r);
+    return failures ? 1 : 0;
 }
 
 static const char *pathname(uint32_t p)
@@ -382,6 +457,23 @@ static int cmd_conformance(const char *dir)
         clips++;
     }
     if (d) closedir(d);
+
+    /* Asking for audio first must not feed-and-drop the video packets that
+     * the shared demuxer crosses on its way to each audio packet. */
+    char avp[PATH_MAX];
+    snprintf(avp, sizeof avp, "%s/h264-av.mp4", dir);
+    struct sess ref, mix;
+    struct acm_frame vf;
+    int refn = 0, mixn = 0, ablocks = 0, samples = 0;
+    r = sess_open(&ref, worker, avp, 0, 0, NULL, 1);
+    while (!r && next_frame(&ref, ACM_WANT_VIDEO, &vf, NULL, 10000) == 0) refn++;
+    sess_close(&ref);
+    r = sess_open(&mix, worker, avp, 0, 0, NULL, 0);
+    if (!r) while (next_audio(&mix, &samples) == 0) ablocks++;
+    if (!r) while (next_frame(&mix, ACM_WANT_VIDEO, &vf, NULL, 10000) == 0) mixn++;
+    CHECK(!r && ablocks > 0 && samples > 0, "h264-av: audio-first decode (%d blocks, %d samples)", ablocks, samples);
+    CHECK(refn > 0 && mixn == refn, "h264-av: audio-first preserves every video packet (%d/%d frames)", mixn, refn);
+    sess_close(&mix);
     CHECK(clips >= 5, "only %d clips", clips);
     printf("conformance: %d clips, %s\n", clips, failures ? "FAILED" : "pass");
     return failures ? 1 : 0;
@@ -716,6 +808,7 @@ int main(int argc, char **argv)
     if (!strcmp(c, "crash")) return cmd_crash(a);
     if (!strcmp(c, "sandbox")) return cmd_sandbox(hw);
     if (!strcmp(c, "fallback")) return cmd_fallback(a);
+    if (!strcmp(c, "avflow")) return cmd_avflow(a);
     if (!strcmp(c, "fuzz")) return cmd_fuzz(a, argc > 3 ? atoi(argv[3]) : 200);
     if (!strcmp(c, "bench")) return cmd_bench(a, hw, copy, dmabuf, realtime, n);
     fprintf(stderr, "acm_test: unknown command %s\n", c);

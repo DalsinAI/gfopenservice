@@ -8,7 +8,8 @@
  * byte, END, a worker that crashes (ERROR, DECODER, FAULT's line, the next
  * session plays), CLOSE while playing, and no worker left behind.
  *
- *   acm_runtime_test LIBACMEDIA FAKEWORKER
+ *   acm_runtime_test LIBACMEDIA FAKEWORKER [--real FILE]
+ *   acm_runtime_test LIBACMEDIA WORKER --real-flow[-paced|-unread] FILE FRAMES SAMPLES
  * Team 6, 12 Nov 2026. MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
@@ -72,14 +73,18 @@ static int count_ev(uint32_t h, uint32_t type, int from) {
 }
 static int nev_now(void) { pthread_mutex_lock(&emu); int n = nev; pthread_mutex_unlock(&emu); return n; }
 
-static char dir[64];
+static char dir[64], real_dir[4096];
+static int real_mode;
 static int sources;
 /* ACM_SRC_ACFS, unit 0: a file in dir */
 static int32_t host_source(const uint8_t *src, uint32_t n, int *fd) {
     *fd = -1;
     if (n < 9 || rd(src) != 1) return ACM_E_BADARG;
-    char p[256];
-    snprintf(p, sizeof p, "%s/%.*s", dir, (int)(n - 8), (const char *)src + 8);
+    char p[4096];
+    const char *base = real_mode ? real_dir : dir;
+    size_t bl = strlen(base), nl = strnlen((const char *)src + 8, n - 8);
+    if (nl == n - 8 || bl + 1 + nl + 1 > sizeof p) return ACM_E_BADARG;
+    memcpy(p, base, bl); p[bl] = '/'; memcpy(p + bl + 1, src + 8, nl + 1);
     *fd = open(p, O_RDONLY | O_CLOEXEC);
     sources++;
     return *fd < 0 ? ACM_E_IO : 0;
@@ -100,7 +105,7 @@ static void file(const char *name, const char *text) {
 /* ---- a stand-in acscreen: each frame shown at once, the one before DONE; STATE off on demand ---- */
 static char vsock[100];
 static int vl = -1;
-static _Atomic int vframes, vhide, vfds_ok = 1, vrects, voff_req, voff_sent;
+static _Atomic int vframes, vcopies, vhide, vfds_ok = 1, vrects, voff_req, voff_sent;
 static void vsend(int c, uint32_t type, const void *b, uint32_t len) {
     uint8_t p[ACV_MAX_PACKET]; struct acv_hdr h = { ACV_MAGIC, type, len, 0 };
     memcpy(p, &h, sizeof h); if (len) memcpy(p + sizeof h, b, len);
@@ -131,17 +136,20 @@ static void *acscreen(void *a) {
                 int k = (int)((x->cmsg_len - CMSG_LEN(0)) / sizeof(int));
                 for (int i = 0; i < k; i++) { int fd; memcpy(&fd, CMSG_DATA(x) + sizeof(int) * (size_t)i, sizeof fd); close(fd); nf++; }
             }
-            if (h.type == ACV_HELLO) { struct acv_welcome w = { ACV_VERSION, 0, 1920, 1080, 60000, 640, 480, 1, 0, 0 }; vsend(c, ACV_WELCOME, &w, sizeof w); }
+            if (h.type == ACV_HELLO) { struct acv_welcome w = { ACV_VERSION, ACV_WF_COPY, 1920, 1080, 60000, 640, 480, 1, 0, 0 }; vsend(c, ACV_WELCOME, &w, sizeof w); }
             else if (h.type == ACV_RECT) vrects++;
             else if (h.type == ACV_HIDE) { vhide++; if (prev) { struct acv_done d = { prev, ACV_W_HIDDEN, 0 }; vsend(c, ACV_DONE, &d, sizeof d); prev = 0; } }
-            else if (h.type == ACV_FRAME) {
-                struct acv_frame f; memcpy(&f, b + sizeof h, sizeof f);
-                if (nf != (int)f.nobj || nf < 1) vfds_ok = 0;
+            else if (h.type == ACV_FRAME || h.type == ACV_COPY) {
+                uint64_t id; memcpy(&id, b + sizeof h, sizeof id);
+                if (h.type == ACV_FRAME) {
+                    struct acv_frame f; memcpy(&f, b + sizeof h, sizeof f);
+                    if (nf != (int)f.nobj || nf < 1) vfds_ok = 0;
+                } else { if (nf != 1) vfds_ok = 0; vcopies++; }
                 vframes++;
-                if (voff_sent) { struct acv_done d = { f.id, ACV_W_NOT_SHOWN, 0 }; vsend(c, ACV_DONE, &d, sizeof d); continue; }
-                struct acv_shown s = { f.id, 0, (uint32_t)vframes, 0 }; vsend(c, ACV_SHOWN, &s, sizeof s);
+                if (voff_sent) { struct acv_done d = { id, ACV_W_NOT_SHOWN, 0 }; vsend(c, ACV_DONE, &d, sizeof d); continue; }
+                struct acv_shown s = { id, 0, (uint32_t)vframes, 0 }; vsend(c, ACV_SHOWN, &s, sizeof s);
                 if (prev) { struct acv_done d = { prev, ACV_W_OK, 0 }; vsend(c, ACV_DONE, &d, sizeof d); }
-                prev = f.id;
+                prev = id;
                 if (voff_req && !voff_sent) {
                     struct acv_state st = { 0, ACV_W_NOT_SHOWN, 1920, 1080 }; vsend(c, ACV_STATE, &st, sizeof st); voff_sent = 1;
                     struct acv_done d = { prev, ACV_W_HIDDEN, 0 }; vsend(c, ACV_DONE, &d, sizeof d); prev = 0;
@@ -188,9 +196,130 @@ static int frame_ok(const uint8_t *b, uint32_t W, uint32_t H, uint32_t p, uint32
     return 1;
 }
 
+/* The real-file receipt: the dynamically linked worker decodes the checked-in
+ * H.264/AAC clip through libacmedia, not through the direct worker harness.
+ * The sink proves one S16 block with a positive byte count and one video
+ * frame. Timing is obtained separately through INFO and events. */
+static int real_file(const char *libpath, const char *worker, const char *clip) {
+    char name[512];
+    real_mode = 1;
+    snprintf(real_dir, sizeof real_dir, "%s", clip);
+    char *sl = strrchr(real_dir, '/');
+    if (!sl) { snprintf(name, sizeof name, "%s", clip); snprintf(real_dir, sizeof real_dir, "."); }
+    else { snprintf(name, sizeof name, "%s", sl + 1); *sl = 0; }
+    setenv("AC_ACMEDIA_WORKER", worker, 1);
+    setenv("AC_ACMEDIA_HW", "0", 1);
+    unsetenv("AC_ACMEDIA_DENY");
+    unsetenv("AC_ACMEDIA_HWONLY");
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
+    acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
+    if (!entry || !(B = entry(&host))) { fprintf(stderr, "real: libacmedia unavailable: %s\n", dlerror()); return 1; }
+    uint8_t d[1024], vt[32] = { 0 }, at[32] = { 0 }, info[4096];
+    be(vt, ACMG_OUT_GUEST); be(at, ACMG_OUT_GUEST);
+    uint32_t h = 0x101, n = srcd(d, name);
+    int from = nev_now();
+    struct ev e;
+    int32_t r = B->open(B->ctx, 1, h, d, n, ACMG_ST_VIDEO | ACMG_ST_AUDIO, vt, at, 0, ACMG_OF_EVENTS_FRAME);
+    if (r != ACM_PENDING || wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0) { fprintf(stderr, "real: OPEN failed (%d)\n", r); return 1; }
+    r = B->info(B->ctx, 1, info, sizeof info);
+    uint32_t ai = rd(info + 4 * ACM_IH_AUDIO);
+    if (r < 0 || rd(info + 4 * ACM_IH_VIDEO) == 0xffffffffu || ai == 0xffffffffu ||
+        rd(info + 4 * (ACM_INFO_HEAD_LONGS + ai * ACM_INFO_STREAM_LONGS + ACM_IS_CHANNELS)) != 2) {
+        fprintf(stderr, "real: INFO has no A/V streams (%d)\n", r); return 1;
+    }
+    uint32_t a4[4] = { 0, 0, 0, 0 };
+    if (B->control(B->ctx, 1, ACMG_CTL_PLAY, a4)) { fprintf(stderr, "real: PLAY failed\n"); return 1; }
+    uint8_t pcm[ACM_MSG_MAX];
+    memset(pcm, 0, sizeof pcm);
+    int32_t abytes = ACM_E_AGAIN;
+    for (int tries = 0; tries < 1000 && abytes == ACM_E_AGAIN; tries++) {
+        abytes = B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 48000);
+        if (abytes == ACM_E_AGAIN) usleep(2000);
+    }
+    int nonzero = 0;
+    if (abytes > 0) for (int32_t i = 0; i < abytes; i++) nonzero |= pcm[i];
+    if (abytes <= 0 || (abytes & 1) || !nonzero) { fprintf(stderr, "real: no S16 audio (%d bytes)\n", abytes); return 1; }
+    if (wait_ev(h, ACMG_EV_FRAME, &from, 5000, &e) < 0) { fprintf(stderr, "real: no video event\n"); return 1; }
+    uint8_t *frame = malloc(640u * 360u * 2u);
+    int32_t vpts = frame ? B->frame(B->ctx, 1, frame, 640u * 360u * 2u, 640, ACMG_PIX_YUV420, 640, 360) : ACM_E_LIMIT;
+    if (vpts < 0) { fprintf(stderr, "real: no video frame (%d)\n", vpts); free(frame); return 1; }
+    uint32_t sum = 0;
+    for (size_t i = 0; i < 640u * 360u * 3u / 2u; i++) sum = sum * 33u + frame[i];
+    free(frame);
+    B->close(B->ctx, 1);
+    printf("acm_runtime_real: PASS video_pts=%d video_checksum=%08x audio_bytes=%d audio=48000Hz/S16BE/stereo\n", vpts, sum, abytes);
+    return 0;
+}
+
+/* The review stress case through the public backend: consume audio as fast
+ * as offered while video stays on its real-time clock. Read-ahead must be
+ * back-pressured, not overflow the worker's crossed-video queue. */
+static int real_flow(const char *libpath, const char *worker, const char *clip, int want_frames, int want_samples,
+                     int pace, int unread) {
+    char name[512];
+    real_mode = 1;
+    snprintf(real_dir, sizeof real_dir, "%s", clip);
+    char *sl = strrchr(real_dir, '/');
+    if (!sl) { snprintf(name, sizeof name, "%s", clip); snprintf(real_dir, sizeof real_dir, "."); }
+    else { snprintf(name, sizeof name, "%s", sl + 1); *sl = 0; }
+    setenv("AC_ACMEDIA_WORKER", worker, 1);
+    setenv("AC_ACMEDIA_HW", "0", 1);
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
+    acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
+    if (!entry || !(B = entry(&host))) { fprintf(stderr, "real-flow: libacmedia unavailable: %s\n", dlerror()); return 1; }
+    uint8_t d[1024], vt[32] = { 0 }, at[32] = { 0 }, pcm[ACM_MSG_MAX];
+    be(vt, ACMG_OUT_GUEST); be(at, ACMG_OUT_GUEST);
+    uint32_t h = 0x101, n = srcd(d, name), a4[4] = { 0 };
+    int from = nev_now(), event_start = from;
+    struct ev e;
+    int32_t r = B->open(B->ctx, 1, h, d, n, ACMG_ST_VIDEO | ACMG_ST_AUDIO, vt, at, 0, ACMG_OF_EVENTS_FRAME);
+    if (r != ACM_PENDING || wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0 || B->control(B->ctx, 1, ACMG_CTL_PLAY, a4)) {
+        fprintf(stderr, "real-flow: OPEN/PLAY failed (%d)\n", r); return 1;
+    }
+    int samples = 0, ended = 0, failed = 0;
+    uint64_t deadline = ms_now() + (uint64_t)(want_frames > 0 ? want_frames * 1000 / 20 + 30000 : 60000);
+    while (ms_now() < deadline && !ended && !failed) {
+        r = unread ? ACM_E_AGAIN : B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 0);
+        if (r > 0) {
+            int got = r / 4;
+            samples += got;
+            if (pace) usleep((useconds_t)((uint64_t)got * 1000000 / 48000));
+        } else if (r != ACM_E_AGAIN && r != ACM_E_EOF) failed = r;
+        pthread_mutex_lock(&emu);
+        for (int i = event_start; i < nev; i++) if (evs[i].h == h) {
+            if (evs[i].type == ACMG_EV_END) ended = 1;
+            if (evs[i].type == ACMG_EV_ERROR) failed = (int32_t)evs[i].a;
+        }
+        pthread_mutex_unlock(&emu);
+        if (r == ACM_E_AGAIN) usleep(500);
+    }
+    /* END may be posted with the final PCM blocks still waiting for the guest. */
+    if (!unread) {
+        uint64_t drain_deadline = ms_now() + 5000;
+        for (;;) {
+            r = B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 0);
+            if (r > 0) { samples += r / 4; continue; }
+            if (r == ACM_E_AGAIN && ms_now() < drain_deadline) { usleep(500); continue; }
+            break;
+        }
+    }
+    int frames = count_ev(h, ACMG_EV_FRAME, event_start);
+    B->close(B->ctx, 1);
+    printf("acm_runtime_real_flow%s%s: %d/%d frames, %d/%d samples, end=%d error=%d\n",
+           pace ? " paced" : "", unread ? " unread" : "", frames, want_frames, samples, want_samples, ended, failed);
+    return !ended || failed || frames != want_frames || samples != want_samples;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA FAKEWORKER\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
     signal(SIGPIPE, SIG_IGN);
+    if (argc == 5 && !strcmp(argv[3], "--real")) return real_file(argv[1], argv[2], argv[4]);
+    if (argc == 7 && !strcmp(argv[3], "--real-flow"))
+        return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 0, 0);
+    if (argc == 7 && !strcmp(argv[3], "--real-flow-paced"))
+        return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 1, 0);
+    if (argc == 7 && !strcmp(argv[3], "--real-flow-unread"))
+        return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 0, 1);
     snprintf(dir, sizeof dir, "/tmp/acmrtXXXXXX");
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
     snprintf(vsock, sizeof vsock, "%s/video.sock", dir);
@@ -249,7 +378,10 @@ int main(int argc, char **argv) {
     file("short.fake", "FAKE 34 18 6 50 HEVC\n");
     file("junk.bin", "not a film\n");
     file("crash.fake", "FAKE 32 16 20 25 crash=3\n");
-    file("long.fake", "FAKE 64 48 100 25\n");
+    file("long.fake", "FAKE 64 48 100 25 soft=1\n");
+    file("av.fake", "FAKE 64 48 10 25 audio=1\n");
+    file("av-unread.fake", "FAKE 64 48 25 25 audio=1\n");
+    file("av-tail.fake", "FAKE 64 48 4 25 audio=1 audio_samples=6400\n");
     file("bad-offset.fake", "FAKE 64 48 2 25 bad=offset\n");
     file("bad-height.fake", "FAKE 64 48 2 25 bad=height\n");
     file("bad-pool.fake", "FAKE 64 48 2 25 bad=pool\n");
@@ -358,7 +490,67 @@ int main(int argc, char **argv) {
     CHECK(B->open(B->ctx, 2, 0x102, d, srcd(d, "film.fake"), ACMG_ST_VIDEO, t2, NULL, 0, 0) == ACM_E_FORMAT, "RTG_SURFACE: ACM_E_FORMAT (stage c)");
     be(t2, 9);
     CHECK(B->open(B->ctx, 2, 0x102, d, srcd(d, "film.fake"), ACMG_ST_VIDEO, t2, NULL, 0, 0) == ACM_E_BADARG, "an unknown target: ACM_E_BADARG");
-    CHECK(B->open(B->ctx, 2, 0x102, d, srcd(d, "film.fake"), ACMG_ST_AUDIO, NULL, NULL, 0, 0) == ACM_E_FORMAT, "audio alone: ACM_E_FORMAT (step 6)");
+    uint8_t atarget[32] = { 0 };
+    be(atarget, ACMG_OUT_GUEST);
+    from = nev_now();
+    uint32_t an = srcd(d, "av.fake");
+    r = B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_VIDEO | ACMG_ST_AUDIO, gtarget, NULL, 0, 0);
+    CHECK(r == ACM_PENDING && wait_ev(0x102, ACMG_EV_OPENED, &from, 5000, &e) >= 0, "A/V request without an audio target opens video only");
+    B->info(B->ctx, 2, out, sizeof out);
+    CHECK(rd(out + 4 * ACM_IH_VIDEO) == 0 && rd(out + 4 * ACM_IH_AUDIO) == 0xffffffffu && rd(out + 4 * ACM_IH_AROUTE) == ACMG_ROUTE_NONE,
+          "no audio target means no audio route");
+    B->close(B->ctx, 2);
+    from = nev_now();
+    r = B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_VIDEO | ACMG_ST_AUDIO, gtarget, atarget, 0, ACMG_OF_EVENTS_FRAME);
+    CHECK(r == ACM_PENDING && wait_ev(0x102, ACMG_EV_OPENED, &from, 5000, &e) >= 0, "A/V OPENED");
+    B->info(B->ctx, 2, out, sizeof out);
+    CHECK(rd(out + 4 * ACM_IH_VIDEO) == 0 && rd(out + 4 * ACM_IH_AUDIO) == 1 && rd(out + 4 * ACM_IH_AROUTE) == ACMG_ROUTE_GUEST,
+          "INFO: video and guest audio; timing is separate from AUDIO");
+    CHECK(rd(out + 4 * (ACM_INFO_HEAD_LONGS + ACM_INFO_STREAM_LONGS + ACM_IS_CHANNELS)) == 2,
+          "INFO: guest audio is stereo");
+    a4[0] = 0;
+    CHECK(B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0, "A/V PLAY");
+    int32_t abytes = ACM_E_AGAIN;
+    for (int tries = 0; tries < 200 && abytes == ACM_E_AGAIN; tries++) { abytes = B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 8000); if (abytes == ACM_E_AGAIN) usleep(5000); }
+    CHECK(abytes == 512 && out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0 &&
+          out[4] == 0 && out[5] == 1 && out[6] == 0 && out[7] == 1,
+          "AUDIO: 512 paired S16BE stereo bytes (%d; %02x%02x/%02x%02x,%02x%02x/%02x%02x)",
+          abytes, out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]);
+    usleep(100000);
+    int burst = 0;
+    while (B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 8000) > 0) burst++;
+    CHECK(burst >= 4, "AUDIO: independent clock queues a burst while video waits (%d blocks)", burst);
+    CHECK(wait_ev(0x102, ACMG_EV_FRAME, &from, 3000, &e) >= 0, "A/V video frame event");
+    pts = B->frame(B->ctx, 2, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48);
+    CHECK(pts >= 0 && frame_ok(fb, 64, 48, 64, (uint32_t)pts / 40), "A/V FRAME: decoded video at PTS %d", pts);
+    B->close(B->ctx, 2);
+    from = nev_now();
+    an = srcd(d, "av-tail.fake");
+    r = B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_VIDEO | ACMG_ST_AUDIO, gtarget, atarget, 0, 0);
+    CHECK(r == ACM_PENDING && wait_ev(0x102, ACMG_EV_OPENED, &from, 5000, &e) >= 0 &&
+          B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0,
+          "A/V with a longer audio tail opens");
+    usleep(250000);                 /* the 160 ms picture has ended; still within the audio grace */
+    int samples = 0;
+    uint64_t audio_deadline = ms_now() + 4000;
+    for (;;) {
+        int32_t ar = B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 8000);
+        if (ar > 0) { samples += ar / 4; continue; }
+        if (ar == ACM_E_AGAIN && ms_now() < audio_deadline) { usleep(1000); continue; }
+        CHECK(ar == ACM_E_EOF, "long audio tail ends cleanly (%d)", ar);
+        break;
+    }
+    CHECK(samples == 6400, "audio after video EOF is not discarded (%d/6400 samples)", samples);
+    B->close(B->ctx, 2);
+    from = nev_now();
+    an = srcd(d, "av-unread.fake");
+    r = B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_VIDEO | ACMG_ST_AUDIO, gtarget, atarget, 0, 0);
+    CHECK(r == ACM_PENDING && wait_ev(0x102, ACMG_EV_OPENED, &from, 5000, &e) >= 0 &&
+          B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0 && wait_ev(0x102, ACMG_EV_END, &from, 3000, &e) >= 0,
+          "A/V END is independent of whether the guest reads audio");
+    B->close(B->ctx, 2);
+    uint8_t ahi[32] = { 0 }; be(ahi, ACMG_OUT_ACAHI);
+    CHECK(B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_AUDIO, NULL, ahi, 0, 0) == ACM_E_FORMAT, "direct ACAHI route is not claimed");
     CHECK(B->open(B->ctx, 2, 0x102, d, srcd(d, "missing.fake"), ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_IO, "a missing source: ACM_E_IO at once");
     from = nev_now();
     h = opened(2, 3, "junk.bin", gtarget, 0, &r);
@@ -444,7 +636,8 @@ int main(int argc, char **argv) {
     CHECK(rd(out + 4 * ACM_IH_VROUTE) == ACMG_ROUTE_PLANE && count_ev(h, ACMG_EV_RECT, 0) == 0, "INFO: route PLANE");
     CHECK(B->control(B->ctx, 4, ACMG_CTL_PLAY, a4) == 0 && wait_ev(h, ACMG_EV_FRAME, &from, 3000, &e) >= 0, "frames shown on the plane (FRAME events)");
     usleep(150000);
-    CHECK(vframes >= 2 && vfds_ok && vrects >= 1, "acscreen got the frames, each with its dma-buf fd, and the rectangle (%d frames)", vframes);
+    CHECK(vframes >= 2 && vcopies >= 2 && vfds_ok && vrects >= 1,
+          "acscreen got software frames with the sealed pool fd, and the rectangle (%d frames, %d copies)", vframes, vcopies);
     int32_t onp = B->frame(B->ctx, 4, fb, sizeof fb, 64, ACMG_PIX_YUV420, 0, 0);
     CHECK(onp == ACM_E_AGAIN, "on the plane: nothing for ACM_FRAME (%d)", onp);
     a4[0] = 5 << 16 | 6; a4[1] = 100 << 16 | 80; a4[2] = 1;

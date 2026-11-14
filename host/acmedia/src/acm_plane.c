@@ -15,6 +15,9 @@
 #ifndef DRM_FORMAT_NV12
 #define DRM_FORMAT_NV12 0x3231564e   /* fourcc_code('N','V','1','2') */
 #endif
+#ifndef DRM_FORMAT_YUV420
+#define DRM_FORMAT_YUV420 0x32315559 /* fourcc_code('Y','U','1','2') */
+#endif
 
 static int psend(struct acm_plane *p, uint32_t type, const void *body, uint32_t len, const int *fds, int nfds) {
     uint8_t b[ACV_MAX_PACKET]; struct acv_hdr h = { ACV_MAGIC, type, len, 0 };
@@ -99,6 +102,32 @@ int acm_plane_send(struct acm_plane *p, const struct acm_frame *fr, const int *f
     return 0;
 }
 
+int acm_plane_send_copy(struct acm_plane *p, struct acm_worker *w, const struct acm_frame *fr, uint64_t due_ns, uint64_t *id) {
+    if (p->fd < 0) return -1;
+    if (!p->on || !(p->welcome.flags & ACV_WF_COPY) || !w || w->pool_fd < 0 || (fr->flags & ACM_FF_DMABUF) || fr->slot >= w->nslots ||
+        !fr->nplanes || fr->nplanes > ACV_MAX_OBJ) return 1;
+    uint32_t fourcc = fr->pixfmt == ACM_PIX_NV12 ? DRM_FORMAT_NV12 :
+                      fr->pixfmt == ACM_PIX_YUV420P ? DRM_FORMAT_YUV420 : 0;
+    if (!fourcc) return 1;
+    int k = -1; for (int i = 0; i < ACM_PLANE_INFLIGHT; i++) if (!p->f[i].live) { k = i; break; }
+    if (k < 0) return 1;
+    struct acv_copy cf = { .id = ++p->next_id, .due_ns = due_ns, .width = fr->width, .height = fr->height,
+                           .fourcc = fourcc, .nplanes = fr->nplanes };
+    uint64_t base = (uint64_t)fr->slot * w->slot_size;
+    for (uint32_t i = 0; i < fr->nplanes; i++) {
+        uint64_t end = (uint64_t)fr->offset[i] + (fr->rows[i] ? (uint64_t)(fr->rows[i] - 1) * fr->pitch[i] : 0) + fr->rowbytes[i];
+        if (!fr->pitch[i] || !fr->rowbytes[i] || !fr->rows[i] || end > w->slot_size || base + fr->offset[i] > UINT32_MAX) return 1;
+        cf.offset[i] = (uint32_t)(base + fr->offset[i]);
+        cf.pitch[i] = fr->pitch[i]; cf.rowbytes[i] = fr->rowbytes[i]; cf.rows[i] = fr->rows[i];
+    }
+    if (psend(p, ACV_COPY, &cf, sizeof cf, &w->pool_fd, 1)) return -1;
+    struct acm_plane_frame *f = &p->f[k];
+    memset(f, 0, sizeof *f);
+    f->live = 1; f->copied = 1; f->id = cf.id; f->due_ns = due_ns; f->slot = fr->slot;
+    if (id) *id = cf.id;
+    return 0;
+}
+
 void acm_plane_release(struct acm_worker *w, uint32_t slot) {
     if (!w) return;
     uint8_t rb[256]; uint32_t rt, rl;
@@ -121,7 +150,10 @@ int acm_plane_pump(struct acm_plane *p, struct acm_worker *w, int ms, struct acm
             ev->id = f->id; ev->vblank_ns = u.s.vblank_ns; ev->due_ns = f->due_ns;
         } else if (ty == ACV_DONE && u.d.id == f->id) {
             ev->id = f->id; ev->why = u.d.why; ev->slot = f->slot;
-            if (!f->shown && u.d.why != ACV_W_DROPPED) {          /* the caller composites this one */
+            if (f->copied) {
+                if (!f->shown) p->dropped++;
+                acm_plane_release(w, f->slot);
+            } else if (!f->shown && u.d.why != ACV_W_DROPPED) {   /* the caller composites this one */
                 p->composited++;
                 ev->composite = 1; ev->nfds = f->nfds; memcpy(ev->fds, f->fds, sizeof(int) * (size_t)f->nfds);
             } else {

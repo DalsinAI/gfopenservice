@@ -9,6 +9,9 @@ PKG     = PKG_CONFIG_PATH=$(PREFIX)/lib/pkgconfig pkg-config --static
 FFLIBS  = libavformat libavcodec libswresample libswscale libavutil
 CFLAGS += -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -std=gnu11
 WCFLAGS = $(CFLAGS) $(shell $(PKG) --cflags $(FFLIBS))
+SYSVA = $(shell pkg-config --exists libva 2>/dev/null && echo 1)
+SYSCFLAGS = $(CFLAGS) $(shell pkg-config --cflags $(FFLIBS)) $(if $(SYSVA),,-DACM_NO_VAAPI_CAPS)
+SYSLIBS = $(shell pkg-config --libs $(FFLIBS)) $(if $(SYSVA),$(shell pkg-config --libs libva libva-drm)) -lpthread
 # FFmpeg, dav1d and libopenmpt statically; libc, libstdc++ (libopenmpt), libm,
 # libz, libdrm, and libva or libudev from the host
 WLIBS   = -Wl,-Bstatic $(shell $(PKG) --libs-only-L $(FFLIBS)) -lavformat -lavcodec -lswresample -lswscale -lavutil \
@@ -34,32 +37,44 @@ all: $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(OUT)/acm
 # what builds and tests without FFmpeg: make runtime OUT=...
 runtime: $(OUT)/acm_plane_test $(RUNTIME)
 
-$(OUT)/acmedia-worker: $(WSRC) src/*.h
+# Host-system FFmpeg, dynamically linked. This is the normal portable worker:
+# the decoder libraries stay host packages and are not copied into GFOS, a
+# pack or a ROM. The pinned static build remains the Pi hardware validation
+# build because it carries the Raspberry Pi request decoder.
+system: $(OUT)/acmedia-worker-system $(OUT)/acm_test runtime
+
+$(OUT):
+	mkdir -p $@
+
+$(OUT)/acmedia-worker: $(WSRC) src/*.h | $(OUT)
 	$(CC) $(WCFLAGS) -o $@ $(WSRC) $(WLIBS)
 
-$(OUT)/acmedia-worker-test: $(WSRC) src/*.h
+$(OUT)/acmedia-worker-test: $(WSRC) src/*.h | $(OUT)
 	$(CC) $(WCFLAGS) -DACM_TEST_HOOKS -o $@ $(WSRC) $(WLIBS)
 
-$(OUT)/acm_test: tests/acm_test.c $(BSRC) src/*.h
+$(OUT)/acmedia-worker-system: $(WSRC) src/*.h | $(OUT)
+	$(CC) $(SYSCFLAGS) -o $@ $(WSRC) $(SYSLIBS)
+
+$(OUT)/acm_test: tests/acm_test.c $(BSRC) src/*.h | $(OUT)
 	$(CC) $(CFLAGS) -o $@ tests/acm_test.c $(BSRC)
 
 # the plane route against a stand-in acscreen: no worker, FFmpeg or display needed
-$(OUT)/acm_plane_test: tests/acm_plane_test.c $(BSRC) src/*.h
+$(OUT)/acm_plane_test: tests/acm_plane_test.c $(BSRC) src/*.h | $(OUT)
 	$(CC) $(CFLAGS) -pthread -o $@ tests/acm_plane_test.c $(BSRC)
 
-$(OUT)/acm_planetest: tests/acm_planetest.c $(BSRC) src/*.h
+$(OUT)/acm_planetest: tests/acm_planetest.c $(BSRC) src/*.h | $(OUT)
 	$(CC) $(CFLAGS) $(DRMCF) -o $@ tests/acm_planetest.c $(BSRC) $(DRMLIB)
 
-$(OUT)/libacmedia.so: $(RSRC) src/*.h
+$(OUT)/libacmedia.so: $(RSRC) src/*.h | $(OUT)
 	$(CC) $(CFLAGS) -fPIC -shared -fvisibility=hidden -pthread -o $@ $(RSRC) -ldl
 
-$(OUT)/acm_fakeworker: tests/acm_fakeworker.c src/acm_msg.c src/*.h
+$(OUT)/acm_fakeworker: tests/acm_fakeworker.c src/acm_msg.c src/*.h | $(OUT)
 	$(CC) $(CFLAGS) -o $@ tests/acm_fakeworker.c src/acm_msg.c
 
-$(OUT)/acm_runtime_test: tests/acm_runtime_test.c src/*.h
+$(OUT)/acm_runtime_test: tests/acm_runtime_test.c src/*.h | $(OUT)
 	$(CC) $(CFLAGS) -pthread -o $@ tests/acm_runtime_test.c -ldl
 
 clean:
-	rm -f $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(OUT)/acm_plane_test $(OUT)/acm_planetest $(RUNTIME)
+	rm -f $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acmedia-worker-system $(OUT)/acm_test $(OUT)/acm_plane_test $(OUT)/acm_planetest $(RUNTIME)
 
-.PHONY: all clean runtime
+.PHONY: all clean runtime system

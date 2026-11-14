@@ -1,10 +1,9 @@
 /*
  * ACMedia's plane route (design 3.2): the broker's side of acscreen's video
- * socket (acvideo_proto.h). Worker frames that came out as dma-bufs go to
- * acscreen, which shows them on a KMS overlay plane; a frame acscreen sends
- * back unshown comes back to the caller, with its fds, to composite into the
- * RTG surface instead. Frames acscreen has finished with go back to the
- * worker (ACM_Q_RELEASE). Nothing here links FFmpeg or libdrm.
+ * socket (acvideo_proto.h). Hardware frames go as dma-bufs; software frames
+ * stay in the sealed worker pool while acscreen copies their visible YUV
+ * rows once into a linear scanout buffer. Both use the same KMS overlay and
+ * remain held until DONE. Nothing here links FFmpeg or libdrm.
  * Team 6, 11 Nov 2026. MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #ifndef ACM_PLANE_H
@@ -15,7 +14,7 @@
 
 #define ACM_PLANE_INFLIGHT 4         /* on the screen, committed, waiting, and one being answered */
 
-struct acm_plane_frame { int live, shown, nfds; uint64_t id, due_ns; uint32_t slot; int fds[ACV_MAX_OBJ]; };
+struct acm_plane_frame { int live, shown, copied, nfds; uint64_t id, due_ns; uint32_t slot; int fds[ACV_MAX_OBJ]; };
 struct acm_plane {
     int fd;
     struct acv_welcome welcome;
@@ -44,6 +43,9 @@ int acm_plane_rect(struct acm_plane *p, const struct acv_rect *r);
  * 1: not sent (the plane is off, or ACM_PLANE_INFLIGHT frames are out): composite it; the fds stay the
  * caller's. -1: acscreen went. */
 int acm_plane_send(struct acm_plane *p, const struct acm_frame *fr, const int *fds, int nfds, uint64_t due_ns, uint64_t *id);
+/* Hands a software frame in w's sealed pool to acscreen for one copy into an
+ * acscreen-owned linear scanout buffer. The pool slot remains held to DONE. */
+int acm_plane_send_copy(struct acm_plane *p, struct acm_worker *w, const struct acm_frame *fr, uint64_t due_ns, uint64_t *id);
 /* One packet from acscreen within ms. Frames acscreen has finished with go back to w (if not NULL). */
 int acm_plane_pump(struct acm_plane *p, struct acm_worker *w, int ms, struct acm_plane_ev *ev);
 /* A worker slot back (a composited frame, drawn). */

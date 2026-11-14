@@ -8,7 +8,7 @@
  *
  *   acm_planetest WORKER CLIP [--card /dev/dri/cardN] [--frames N] [--fps F]
  *                 [--test-only] [--no-pace] [--plane ID] [--verbose]
- *                 [--acscreen SOCKET]
+ *                 [--acscreen SOCKET [--copy]]
  *
  *   --test-only  import every frame and check it with a TEST_ONLY atomic
  *                commit, never flip: for a box whose screen another program
@@ -27,6 +27,10 @@
  *                them over its RTG monitor, fitted. Frames it sends back
  *                unshown are counted as "composited" (what the broker would
  *                draw into the RTG surface instead)
+ *   --copy       with --acscreen only: disable hardware decode, force the
+ *                worker's sealed software-frame pool, and send every frame
+ *                with ACV_COPY/acm_plane_send_copy. This is the physical
+ *                acceptance path for acscreen's bounded COPY implementation.
  *
  * It needs DRM master on the card (nothing else showing on it: stop acscreen
  * first, in a lab), a connected display unless --test-only, and a worker
@@ -358,23 +362,32 @@ static int cmpd(const void *a, const void *b) { double x = *(const double *)a, y
 /* ---- --acscreen: through acscreen's video socket (acm_plane.c, the broker's own route) ---- */
 static uint64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
 
-static int run_acscreen(const char *sock, const char *exe, const char *clip, int frames, double fps_arg, int pace) {
+static int run_acscreen(const char *sock, const char *exe, const char *clip, int frames, double fps_arg, int pace, int copy) {
     struct acm_plane pl; char why[200];
     if (acm_plane_open(&pl, sock, why, sizeof why)) { printf("planetest: FAIL %s\n", why); return 1; }
     printf("planetest: acscreen: monitor %ux%u at %.3f Hz, RTG %ux%u, plane %s (%u)\n", pl.welcome.mon_w, pl.welcome.mon_h,
            pl.welcome.refresh_mhz / 1000.0, pl.welcome.rtg_w, pl.welcome.rtg_h, pl.on ? "usable" : "off", pl.why);
+    if (copy && !(pl.welcome.flags & ACV_WF_COPY)) {
+        printf("planetest: FAIL acscreen did not advertise COPY support\n");
+        acm_plane_close(&pl, NULL, 0);
+        return 1;
+    }
     struct acv_rect r = { 0, 0, 0, 0, ACV_SPACE_FIT, 1 };
     acm_plane_rect(&pl, &r);
 
-    struct acm_worker w; struct acm_hello h; acm_hello_all(&h, ACM_HF_HW);
-    if (acm_spawn(&w, exe, 1, 4096, !verbose, &h)) { printf("planetest: FAIL worker: %s\n", w.why); acm_plane_close(&pl, NULL, 0); return 1; }
+    struct acm_worker w; struct acm_hello h; acm_hello_all(&h, copy ? ACM_HF_COPY : ACM_HF_HW);
+    if (acm_spawn(&w, exe, copy ? 0 : 1, 4096, !verbose, &h)) { printf("planetest: FAIL worker: %s\n", w.why); acm_plane_close(&pl, NULL, 0); return 1; }
     int src = open(clip, O_RDONLY | O_CLOEXEC);
     uint32_t t, len;
     struct acm_open o = { -1, -2, 0, 0 };
     if (src < 0 || acm_give_source(&w, src) || acm_ask(&w, ACM_Q_OPEN, &o, sizeof o, NULL, 0, &t, buf, sizeof buf, &len, NULL, NULL, 15000) || t != ACM_A_OPENED)
         { printf("planetest: FAIL open %s\n", clip); acm_plane_close(&pl, &w, 0); acm_end(&w); return 1; }
     struct acm_opened op; memcpy(&op, buf, sizeof op);
-    printf("planetest: %s, %ux%u, path 0x%x\n", clip, op.width, op.height, op.vpath);
+    printf("planetest: %s, %ux%u, path 0x%x, %s route\n", clip, op.width, op.height, op.vpath, copy ? "software COPY" : "zero-copy dma-buf");
+    if (copy && op.vpath != ACM_PATH_SW) {
+        printf("planetest: FAIL --copy worker selected non-software path 0x%x\n", op.vpath);
+        acm_plane_close(&pl, &w, 0); acm_end(&w); return 1;
+    }
     if (op.nslots && acm_give_pool(&w, op.slot_size, op.nslots)) { printf("planetest: FAIL pool\n"); acm_plane_close(&pl, &w, 0); acm_end(&w); return 1; }
     double fps = fps_arg;
     if (fps <= 0 && op.video >= 0 && (uint32_t)op.video < op.info.nstreams && op.info.s[op.video].rate_den)
@@ -382,7 +395,8 @@ static int run_acscreen(const char *sock, const char *exe, const char *clip, int
     if (fps <= 0) fps = 30;
 
     static double late[MAXF];
-    int sent = 0, notdma = 0, offplane = 0, nlate = 0, failed = 0;
+    int sent = 0, copied = 0, wrong_kind = 0, offplane = 0, nlate = 0, failed = 0;
+    int shown_ev = 0, done_ev = 0, state_ev = 0;
     uint64_t waiting = 0, t0 = 0; int64_t pts0 = 0;
     double cpu0 = proc_cpu(getpid()), wcpu0 = proc_cpu(w.pid), wall0 = now_s();
     struct acm_plane_ev ev;
@@ -392,31 +406,46 @@ static int run_acscreen(const char *sock, const char *exe, const char *clip, int
         while (waiting && !failed) {
             int ty = acm_plane_pump(&pl, &w, 2000, &ev);
             if (ty <= 0) { printf("planetest: acscreen %s\n", ty ? "went" : "said nothing for 2 s"); failed = 1; break; }
+            if (ty == ACV_SHOWN) shown_ev++;
+            else if (ty == ACV_DONE) done_ev++;
+            else if (ty == ACV_STATE) state_ev++;
             if (ty == ACV_STATE) printf("planetest: acscreen: plane %s (%u)\n", pl.on ? "on" : "off", ev.why);
             if (ty == ACV_SHOWN && pace && nlate < MAXF && ev.due_ns) late[nlate++] = ((double)ev.vblank_ns - (double)ev.due_ns) / 1e6;
             if (ev.composite) { for (int i = 0; i < ev.nfds; i++) close(ev.fds[i]); acm_plane_release(&w, ev.slot); }   /* the broker would draw it */
             if ((ev.id == waiting && (ty == ACV_SHOWN || ty == ACV_DONE)) || !pl.on) waiting = 0;
         }
         if (failed) break;
-        while (acm_plane_pump(&pl, &w, 0, &ev) > 0)     /* whatever acscreen said meanwhile */
+        for (;;) {                                      /* whatever acscreen said meanwhile */
+            int ty = acm_plane_pump(&pl, &w, 0, &ev);
+            if (ty <= 0) break;
+            if (ty == ACV_SHOWN) shown_ev++;
+            else if (ty == ACV_DONE) done_ev++;
+            else if (ty == ACV_STATE) state_ev++;
             if (ev.composite) { for (int i = 0; i < ev.nfds; i++) close(ev.fds[i]); acm_plane_release(&w, ev.slot); }
+        }
         int fds[ACM_MAX_FDS], nf = 0;
-        if (acm_ask(&w, ACM_Q_NEXT, &(struct acm_next){ ACM_WANT_VIDEO | ACM_WANT_DMABUF, 0 }, sizeof(struct acm_next), NULL, 0, &t, buf, sizeof buf, &len, fds, &nf, 5000))
+        uint32_t want = ACM_WANT_VIDEO | (copy ? 0 : ACM_WANT_DMABUF);
+        if (acm_ask(&w, ACM_Q_NEXT, &(struct acm_next){ want, 0 }, sizeof(struct acm_next), NULL, 0, &t, buf, sizeof buf, &len, fds, &nf, 5000))
             { printf("planetest: worker gone: %s\n", w.why); failed = 1; break; }
         if (t != ACM_A_FRAME) { for (int i = 0; i < nf; i++) close(fds[i]); if (acm_err(t, buf, ACM_E_BADARG) == ACM_E_EOF) break; failed = 1; break; }
         struct acm_frame fr; memcpy(&fr, buf, sizeof fr);
         if (!t0) { t0 = mono_ns() + 50000000ull; pts0 = fr.pts_ms; }
         uint64_t due = !pace ? 0 : t0 + (uint64_t)((fr.pts_ms != INT64_MIN && fr.pts_ms >= pts0 ? (double)(fr.pts_ms - pts0) : sent * 1000.0 / fps) * 1e6);
-        if (n == 0) printf("planetest: frames are %.4s, modifier 0x%016llx, %u object(s)\n", fr.drm_fourcc ? (char *)&fr.drm_fourcc : "NV12", (unsigned long long)fr.drm_modifier, fr.nobj);
+        if (n == 0) printf("planetest: frames are %s %.4s, modifier 0x%016llx, %u object(s), pool slot %u\n",
+                           copy ? "COPY" : "dma-buf", fr.drm_fourcc ? (char *)&fr.drm_fourcc : "NV12",
+                           (unsigned long long)fr.drm_modifier, fr.nobj, fr.slot);
         uint64_t id = 0;
-        int s2 = acm_plane_send(&pl, &fr, fds, nf, due, &id);
-        if (s2 < 0) { for (int i = 0; i < nf; i++) close(fds[i]); printf("planetest: acscreen went\n"); acm_plane_release(&w, fr.slot); failed = 1; break; }
+        if ((copy && (fr.flags & ACM_FF_DMABUF)) || (!copy && !(fr.flags & ACM_FF_DMABUF))) wrong_kind++;
+        int s2 = copy ? acm_plane_send_copy(&pl, &w, &fr, due, &id) : acm_plane_send(&pl, &fr, fds, nf, due, &id);
+        if (copy) for (int i = 0; i < nf; i++) close(fds[i]);
+        if (s2 < 0) { if (!copy) for (int i = 0; i < nf; i++) close(fds[i]); printf("planetest: acscreen went\n"); acm_plane_release(&w, fr.slot); failed = 1; break; }
         if (s2 == 1) {                                  /* not for the plane now: the broker would composite it */
-            if (!(fr.flags & ACM_FF_DMABUF)) notdma++; else offplane++;
-            for (int i = 0; i < nf; i++) close(fds[i]);
+            offplane++;
+            if (!copy) for (int i = 0; i < nf; i++) close(fds[i]);
             acm_plane_release(&w, fr.slot);
             continue;
         }
+        if (copy) copied++;
         sent++; waiting = id;
     }
     double wall = now_s() - wall0, cpu = proc_cpu(getpid()) - cpu0, wcpu = proc_cpu(w.pid) - wcpu0;
@@ -424,25 +453,29 @@ static int run_acscreen(const char *sock, const char *exe, const char *clip, int
     acm_end(&w);
     double p50 = 0, p99 = 0;
     if (nlate) { qsort(late, (size_t)nlate, sizeof late[0], cmpd); p50 = late[nlate / 2]; p99 = late[(int)(nlate * 0.99) < nlate ? (int)(nlate * 0.99) : nlate - 1]; }
-    printf("planetest: via acscreen: %d sent, %u shown, %u composited (sent back), %d off the plane, %u dropped, %d not dma-buf; %.2f s, %.1f fps shown\n",
-           sent, pl.shown, pl.composited, offplane, pl.dropped, notdma, wall, wall > 0 ? pl.shown / wall : 0);
+    printf("planetest: via acscreen: %d sent (%d COPY), %u shown, %u composited (sent back), %d off the plane, %u dropped, %d wrong frame kind; %.2f s, %.1f fps shown\n",
+           sent, copied, pl.shown, pl.composited, offplane, pl.dropped, wrong_kind, wall, wall > 0 ? pl.shown / wall : 0);
+    printf("planetest: protocol: WELCOME copy=%s; SHOWN %d, DONE %d, STATE %d\n",
+           pl.welcome.flags & ACV_WF_COPY ? "yes" : "no", shown_ev, done_ev, state_ev);
     printf("planetest: CPU: this %.1f%% of a core, worker %.1f%%; vblank after due p50 %.2f ms, p99 %.2f ms\n",
            wall > 0 ? 100 * cpu / wall : 0, wall > 0 ? 100 * wcpu / wall : 0, p50, p99);
-    int pass = !failed && pl.shown > 0 && !notdma && !pl.composited && !offplane;
-    printf("planetest: %s\n", pass ? "PASS zero-copy frames on acscreen's overlay plane" : "FAIL (see above)");
+    int pass = !failed && sent > 0 && pl.shown > 0 && !wrong_kind && !pl.composited && !offplane && !pl.dropped;
+    if (copy) pass = pass && copied == sent && (pl.welcome.flags & ACV_WF_COPY) && (sent < 2 || done_ev > 0);
+    printf("planetest: %s\n", pass ? (copy ? "PASS software COPY frames through acscreen" : "PASS zero-copy frames on acscreen's overlay plane") : "FAIL (see above)");
     return pass ? 0 : 1;
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: acm_planetest WORKER CLIP [--card PATH] [--frames N] [--fps F] [--test-only] [--writeback [--dump PPM]] [--no-pace] [--plane ID] [--verbose] [--acscreen SOCKET]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: acm_planetest WORKER CLIP [--card PATH] [--frames N] [--fps F] [--test-only] [--writeback [--dump PPM]] [--no-pace] [--plane ID] [--verbose] [--acscreen SOCKET [--copy]]\n"); return 2; }
     const char *exe = argv[1], *clip = argv[2], *card = NULL, *acscreen = NULL;
-    int frames = 300, test_only = 0, pace = 1; double fps = 0; uint32_t want_plane = 0;
+    int frames = 300, test_only = 0, pace = 1, copy = 0; double fps = 0; uint32_t want_plane = 0;
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--card") && i + 1 < argc) card = argv[++i];
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--fps") && i + 1 < argc) fps = atof(argv[++i]);
         else if (!strcmp(argv[i], "--plane") && i + 1 < argc) want_plane = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--acscreen") && i + 1 < argc) acscreen = argv[++i];
+        else if (!strcmp(argv[i], "--copy")) copy = 1;
         else if (!strcmp(argv[i], "--test-only")) test_only = 1;
         else if (!strcmp(argv[i], "--writeback")) wb_mode = 1;
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) wb_dump = argv[++i];
@@ -450,8 +483,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--verbose")) verbose = 1;
         else { fprintf(stderr, "planetest: unknown %s\n", argv[i]); return 2; }
     }
+    if (copy && !acscreen) { fprintf(stderr, "planetest: --copy requires --acscreen SOCKET\n"); return 2; }
     if (frames < 1 || frames > MAXF) frames = MAXF;
-    if (acscreen) return run_acscreen(acscreen, exe, clip, frames, fps, pace);
+    if (acscreen) return run_acscreen(acscreen, exe, clip, frames, fps, pace, copy);
     struct kms k;
     if (kms_open(&k, card, test_only)) { printf("planetest: FAIL no KMS output\n"); return 1; }
 
