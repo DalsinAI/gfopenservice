@@ -20,11 +20,12 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 | `tests/acm_test.c`, `tests/run_tests.sh` | The host test harness |
 | `src/acm_plane.c`, `src/acvideo_proto.h` | The plane route (design 3.2): hardware dma-bufs and software-pool YUV frames to acscreen's video socket; acscreen copies software frames once into its own linear scanout BO (Team 6; the protocol is amicradle `appliance/acscreen/acvideo_proto.h`) |
 | `tests/acm_plane_test.c` | The plane route against a stand-in acscreen (no worker, FFmpeg or display) |
-| `tests/acm_planetest.c` | M4K step 2: the worker's dma-bufs on a KMS overlay plane (`--test-only`, `--writeback`, `--acscreen`); built where libdrm is |
+| `tests/acm_planetest.c`, `tests/test_planetest_copy.py` | M4K step 2: the worker's dma-bufs on a KMS overlay plane (`--test-only`, `--writeback`, `--acscreen`), plus the timed COPY/STATE-off/on regression; built where libdrm is |
 | `src/acm_runtime.c` → `libacmedia.so` | M4K step 4: the runtime's backend for the twelve ids (`acmedia_backend_v1`, `src/acmedia_service.h`, a copy of gfosmotherboards'). A worker per session and per probe, frames to acscreen's plane or to ACM_FRAME; no FFmpeg (Team 6) |
 | `src/acm_guest.h` | The guest ABI's numbers as the backend answers them, and the CAPS, INFO and RESULT block layouts (to go into amicradle-guest's `hostlib/acmedia/acmedia.h`) |
 | `tests/acm_runtime_test.c`, `tests/acm_fakeworker.c` | `libacmedia.so` loaded as the runtime loads it, against a stand-in worker (the protocol, made-up frames, no FFmpeg) and a stand-in acscreen |
-| `tests/gen_clips.sh`, `tests/gen_amiga.py`, `tests/clips/` | The test clips (CDXL, ILBM, 8SVX and the module are written by `gen_amiga.py` from the formats' definitions) |
+| `tests/gen_clips.sh`, `tests/gen_amiga.py`, `tests/clips/` | The short test clips (CDXL, ILBM, 8SVX and the module are written by `gen_amiga.py` from the formats' definitions) |
+| `tests/gen_long_clip.sh`, `tests/test_gen_long_clip.sh` | The reproducible, untracked 60-second H.264/AAC fixture for interactive F12/menu and interruption receipts, and its fast recipe contract test |
 
 ## Building
 
@@ -140,8 +141,70 @@ the stream.
     sh tests/run_tests.sh           # all of them, on this host
     build/<arch>/acm_test bench FILE [--hw] [--copy] [--dmabuf] [--realtime]
 
+### Pi acscreen COPY acceptance
+
+With the approved acscreen software-frame build running on the Pi and its
+video socket enabled, this forces software decoding into the worker's sealed
+pool and exercises `ACV_COPY` rather than the default dma-buf route:
+
+    PORT=0                                      # the running AmiCradle instance
+    SOCK=/run/amicradle/acscreen-video-$PORT.sock
+    build/aarch64/acm_planetest build/aarch64/acmedia-worker \
+        tests/clips/h264-small.mkv --acscreen "$SOCK" --copy --frames 30 --verbose
+
+The receipt must identify `software COPY route` and `frames are COPY`, report
+`WELCOME copy=yes`, at least one `SHOWN` and (for 30 frames) at least one
+`DONE`, zero wrong-kind/composited/off-plane/dropped frames, and end exactly:
+
+    planetest: PASS software COPY frames through acscreen
+
+Omit `--copy` for the existing zero-copy dma-buf test; that remains the
+default and still ends `PASS zero-copy frames on acscreen's overlay plane`.
+
+### Long interactive A/V fixture
+
+The checked-in `tests/clips/h264-av.mp4` is intentionally only 2 seconds (60
+frames), so it cannot prove an F12/menu interaction or a service kill in the
+middle of sustained playback. Generate the long receipt fixture locally; it
+is ignored by git and is never part of a pack or ROM:
+
+    sh tests/gen_long_clip.sh
+
+The default output is `tests/generated/h264-av-60s.mp4`. The recipe requires
+the host's `ffmpeg`, `ffprobe` and `sha256sum`, and refuses the result unless it
+is exactly 60.000 seconds (within 1 ms), 1,800 frames of H.264 640x360 YUV420p
+at 30 fps, and stereo AAC at 48 kHz. It prints those facts and writes the hash
+capture beside it as `h264-av-60s.mp4.sha256`. Record both files' output in the
+Pi receipt; the SHA-256 identifies the exact locally generated input rather
+than pretending that different distribution FFmpeg builds are bit-identical.
+
+For a sustained 60-second software COPY acceptance run, use the generated
+path and request all 1,800 frames:
+
+    build/aarch64/acm_planetest build/aarch64/acmedia-worker-system \
+        tests/generated/h264-av-60s.mp4 --acscreen "$SOCK" --copy \
+        --frames 1800 --verbose
+
+The F12/menu and kill-mid-frame proofs must use the same long input in the
+full card/player runbook and capture the client, worker and acscreen logs.
+`acm_planetest` is the plane-protocol acceptance client, not the Amiga player:
+while the menu reports STATE off it stops consuming the film, waits up to 30
+seconds for STATE on, and moves the presentation clock by that pause. Its
+final PASS can therefore accompany the F12 plane-loss/return receipt, but it
+does not prove that Amiga input or service restart survived. Those remain
+physical Pi/display proofs; generating and decoding the clip alone does not
+claim them. `--seconds N --output FILE` may be used for a quick local recipe
+check, for example:
+
+    sh tests/gen_long_clip.sh --seconds 1 --output /tmp/acmedia-smoke.mp4
+
 `run_tests.sh` runs these:
 
+- the long-clip recipe's default duration, stream options, hash receipt,
+  duration override and bad-option rejection without generating 60 seconds of
+  media on every test pass;
+- a timed stand-in acscreen takes the COPY plane off and restores it, proving
+  `acm_planetest` waits without burning frames and resumes all 60 paced frames;
 - the protocol's good and bad requests, and every clip: probe, frames to the
   end, the end twice, seek, the same frames again;
 - audio-first demux preserves every video packet, and the runtime delivers a
