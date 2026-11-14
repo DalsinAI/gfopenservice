@@ -31,7 +31,7 @@
 #include "../src/acm_codecs.h"
 
 static int sock = 3, srcfd = -1;
-static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4, has_audio, force_soft;
+static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4, has_audio, audio_samples, force_soft;
 static uint8_t *pool; static uint32_t slot_size; static int given[64];
 static uint32_t k, ak;                               /* the next video/audio data */
 static struct acm_info info;
@@ -53,6 +53,7 @@ static int parse(void) {
     c = strstr(line, "hang="); if (c) hang_at = (uint32_t)atoi(c + 5);
     c = strstr(line, "slots="); if (c) { nslots = (uint32_t)atoi(c + 6); if (!nslots || nslots > 64) nslots = 4; }
     has_audio = strstr(line, "audio=1") != NULL;
+    c = strstr(line, "audio_samples="); if (c) audio_samples = (uint32_t)atoi(c + 14);
     force_soft = strstr(line, "soft=1") != NULL;
     memset(&info, 0, sizeof info);
     info.container = ACM_TAG('M', 'K', 'V', ' ');
@@ -75,7 +76,7 @@ static void fill(uint8_t *b, uint32_t f) {
 static void next(uint32_t want) {
     if (!opened) { err(ACM_E_BADARG, "nothing open"); return; }
     if (want & ACM_WANT_AUDIO) {
-        uint32_t total = N * 8000 / fps;
+        uint32_t total = audio_samples ? audio_samples : N * 8000 / fps;
         if (!has_audio || ak >= total) { err(ACM_E_EOF, "audio end"); return; }
         uint32_t frames = total - ak < 128 ? total - ak : 128;
         uint8_t b[sizeof(struct acm_audio) + 512];

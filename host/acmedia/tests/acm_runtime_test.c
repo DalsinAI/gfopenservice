@@ -315,6 +315,7 @@ int main(int argc, char **argv) {
     file("long.fake", "FAKE 64 48 100 25 soft=1\n");
     file("av.fake", "FAKE 64 48 10 25 audio=1\n");
     file("av-unread.fake", "FAKE 64 48 25 25 audio=1\n");
+    file("av-tail.fake", "FAKE 64 48 4 25 audio=1 audio_samples=6400\n");
     uint8_t d[256], out[4096];
     int from = 0;
     struct ev e;
@@ -446,6 +447,24 @@ int main(int argc, char **argv) {
     CHECK(wait_ev(0x102, ACMG_EV_FRAME, &from, 3000, &e) >= 0, "A/V video frame event");
     pts = B->frame(B->ctx, 2, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48);
     CHECK(pts >= 0 && frame_ok(fb, 64, 48, 64, (uint32_t)pts / 40), "A/V FRAME: decoded video at PTS %d", pts);
+    B->close(B->ctx, 2);
+    from = nev_now();
+    an = srcd(d, "av-tail.fake");
+    r = B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_VIDEO | ACMG_ST_AUDIO, gtarget, atarget, 0, 0);
+    CHECK(r == ACM_PENDING && wait_ev(0x102, ACMG_EV_OPENED, &from, 5000, &e) >= 0 &&
+          B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0,
+          "A/V with a longer audio tail opens");
+    usleep(250000);                 /* the 160 ms picture has ended; still within the audio grace */
+    int samples = 0;
+    uint64_t audio_deadline = ms_now() + 4000;
+    for (;;) {
+        int32_t ar = B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 8000);
+        if (ar > 0) { samples += ar / 4; continue; }
+        if (ar == ACM_E_AGAIN && ms_now() < audio_deadline) { usleep(1000); continue; }
+        CHECK(ar == ACM_E_EOF, "long audio tail ends cleanly (%d)", ar);
+        break;
+    }
+    CHECK(samples == 6400, "audio after video EOF is not discarded (%d/6400 samples)", samples);
     B->close(B->ctx, 2);
     from = nev_now();
     an = srcd(d, "av-unread.fake");

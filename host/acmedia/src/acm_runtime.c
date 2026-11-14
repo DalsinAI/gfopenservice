@@ -69,6 +69,7 @@ uint32_t acm_tag_parse(const char *s);
 #define RT_PROBES 16
 #define RT_QUEUE 16
 #define RT_AUDIO_QUEUE 8             /* about 170 ms at the worker's usual 1024/48 kHz blocks */
+#define RT_AUDIO_IDLE_NS 500000000ull /* abandon only an unread tail, not active playback */
 #define RT_NEXT_MS 10000              /* the watchdog on one frame */
 #define RT_ASK_MS 2000
 
@@ -125,6 +126,7 @@ struct sess {
     int64_t base_pts;
     int based;
     int veof, aeof;
+    uint64_t veof_ns, audio_read_ns;
 };
 
 struct probe {
@@ -427,6 +429,7 @@ static void seek_to(struct sess *s, int64_t ms, uint32_t flags) {
     pthread_mutex_lock(&s->mu);
     s->aqh = s->aqn = 0;
     s->veof = s->aeof = 0;
+    s->veof_ns = s->audio_read_ns = 0;
     if (!r) { s->pos_ms = ms; if (s->state == ACM_STATE_ENDED) s->state = ACM_STATE_PAUSED; }
     int dead = s->w.dead;
     pthread_mutex_unlock(&s->mu);
@@ -500,11 +503,15 @@ static int wait_until(struct sess *s, uint64_t t) {
  * events, while ACM_AUDIO returns the copied byte count. */
 static int step_audio(struct sess *s) {
     pthread_mutex_lock(&s->mu);
-    /* Once video has ended, unread sound must not hold END forever. Drop the
-     * oldest queued block and continue draining the worker to its own EOF. */
+    /* Once video has ended, unread sound must not hold END forever. An
+     * active guest is allowed to play the whole tail; only an idle full
+     * queue is discarded so the worker can be drained to its own EOF. */
     if (s->veof && s->aqn == RT_AUDIO_QUEUE) {
-        s->aqh = (s->aqh + 1) % RT_AUDIO_QUEUE;
-        s->aqn--;
+        uint64_t last = s->audio_read_ns > s->veof_ns ? s->audio_read_ns : s->veof_ns;
+        if (now_ns() - last >= RT_AUDIO_IDLE_NS) {
+            s->aqh = (s->aqh + 1) % RT_AUDIO_QUEUE;
+            s->aqn--;
+        }
     }
     int need = s->op.audio >= 0 && s->aqn < RT_AUDIO_QUEUE && !s->aeof;
     pthread_mutex_unlock(&s->mu);
@@ -563,7 +570,7 @@ static void step(struct sess *s) {
         }
         if (r == ACM_E_AGAIN) { plane_events(s, 10); return; }       /* every slot is out: wait for one back */
         if (r == ACM_E_EOF) {
-            pthread_mutex_lock(&s->mu); s->veof = 1; pthread_mutex_unlock(&s->mu);
+            pthread_mutex_lock(&s->mu); s->veof = 1; s->veof_ns = now_ns(); pthread_mutex_unlock(&s->mu);
             finish_if_done(s);
             return;
         }
@@ -863,6 +870,7 @@ static int32_t be_audio(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, ui
 #endif
         s->aqh = (s->aqh + 1) % RT_AUDIO_QUEUE;
         s->aqn--;
+        s->audio_read_ns = now_ns();
         pthread_cond_signal(&s->cv);
         r = (int32_t)bytes;
     }

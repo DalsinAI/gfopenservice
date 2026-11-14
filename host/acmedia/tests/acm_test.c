@@ -382,6 +382,23 @@ static int cmd_conformance(const char *dir)
         clips++;
     }
     if (d) closedir(d);
+
+    /* Asking for audio first must not feed-and-drop the video packets that
+     * the shared demuxer crosses on its way to each audio packet. */
+    char avp[PATH_MAX];
+    snprintf(avp, sizeof avp, "%s/h264-av.mp4", dir);
+    struct sess ref, mix;
+    struct acm_frame vf;
+    int refn = 0, mixn = 0, ablocks = 0, samples = 0;
+    r = sess_open(&ref, worker, avp, 0, 0, NULL, 1);
+    while (!r && next_frame(&ref, ACM_WANT_VIDEO, &vf, NULL, 10000) == 0) refn++;
+    sess_close(&ref);
+    r = sess_open(&mix, worker, avp, 0, 0, NULL, 0);
+    if (!r) while (next_audio(&mix, &samples) == 0) ablocks++;
+    if (!r) while (next_frame(&mix, ACM_WANT_VIDEO, &vf, NULL, 10000) == 0) mixn++;
+    CHECK(!r && ablocks > 0 && samples > 0, "h264-av: audio-first decode (%d blocks, %d samples)", ablocks, samples);
+    CHECK(refn > 0 && mixn == refn, "h264-av: audio-first preserves every video packet (%d/%d frames)", mixn, refn);
+    sess_close(&mix);
     CHECK(clips >= 5, "only %d clips", clips);
     printf("conformance: %d clips, %s\n", clips, failures ? "FAILED" : "pass");
     return failures ? 1 : 0;

@@ -89,6 +89,9 @@ static SwrContext *swr;
 static uint32_t a_rate, a_ch;
 static AVFrame *aq[64];           /* decoded audio not yet asked for */
 static int aqn;
+#define VIDEO_PACKET_QUEUE 256
+static AVPacket *vq[VIDEO_PACKET_QUEUE]; /* video packets crossed while audio was requested */
+static int vqn;
 
 /* the pool */
 static uint8_t *pool;
@@ -412,6 +415,26 @@ static void queue_audio(AVFrame *f)
     aq[aqn++] = f;
 }
 
+static void clear_video_packets(void)
+{
+    for (int i = 0; i < vqn; i++) av_packet_free(&vq[i]);
+    vqn = 0;
+}
+
+static int drain_audio(void)
+{
+    for (;;) {
+        AVFrame *f = av_frame_alloc();
+        if (!f) return ACM_E_LIMIT;
+        int r = avcodec_receive_frame(A.c, f);
+        if (r == 0) { queue_audio(f); continue; }
+        av_frame_free(&f);
+        if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) return 0;
+        last_ff = r;
+        return ff2acm(r);
+    }
+}
+
 static int receive(struct dec *d, AVFrame *out)
 {
     for (;;) {
@@ -426,6 +449,18 @@ static int receive(struct dec *d, AVFrame *out)
 
 static int feed(struct dec *want)
 {
+    /* Pulling audio may cross video packets in the demuxer. Keep those
+     * packets in order until video asks for them; sending them to a full
+     * decoder and ignoring EAGAIN loses pictures. */
+    if (want == &V && vqn) {
+        int s = avcodec_send_packet(V.c, vq[0]);
+        if (s == AVERROR(EAGAIN)) return 0;
+        AVPacket *p = vq[0];
+        memmove(vq, vq + 1, sizeof(vq[0]) * (size_t)--vqn);
+        av_packet_free(&p);
+        if (s < 0 && s != AVERROR_INVALIDDATA) { last_ff = s; return ff2acm(s); }
+        return 0;
+    }
     AVPacket *pkt = av_packet_alloc();
     if (!pkt) return ACM_E_LIMIT;
     int r = 0;
@@ -438,12 +473,18 @@ static int feed(struct dec *want)
         if (e < 0) { r = ACM_E_IO; break; }
         struct dec *to = pkt->stream_index == V.idx && V.c ? &V : pkt->stream_index == A.idx && A.c ? &A : NULL;
         if (to) {
-            int s = avcodec_send_packet(to->c, pkt);
-            if (s < 0 && s != AVERROR(EAGAIN) && s != AVERROR_INVALIDDATA && to == want) { av_packet_unref(pkt); last_ff = s; r = ff2acm(s); break; }
-            if (to == &A && want != &A) {                    /* keep the audio decoder drained */
-                AVFrame *f = av_frame_alloc();
-                while (f && avcodec_receive_frame(A.c, f) == 0) { queue_audio(f); f = av_frame_alloc(); }
-                av_frame_free(&f);
+            if (to == &V && want != &V) {
+                if (vqn == VIDEO_PACKET_QUEUE || !(vq[vqn] = av_packet_clone(pkt))) { r = ACM_E_LIMIT; av_packet_unref(pkt); break; }
+                vqn++;
+            } else {
+                int s = avcodec_send_packet(to->c, pkt);
+                if (to == &A && want != &A && s == AVERROR(EAGAIN)) {
+                    r = drain_audio();
+                    if (!r) s = avcodec_send_packet(to->c, pkt);
+                }
+                if (!r && s < 0 && s != AVERROR(EAGAIN) && s != AVERROR_INVALIDDATA && to == want) { last_ff = s; r = ff2acm(s); }
+                if (!r && to == &A && want != &A) r = drain_audio();
+                if (r) { av_packet_unref(pkt); break; }
             }
         }
         av_packet_unref(pkt);
@@ -465,6 +506,7 @@ static int fallback_to_sw(void)
     int r = open_dec(&V, idx, 0, 0);
     if (r) return r;
     if (last != AV_NOPTS_VALUE) {
+        clear_video_packets();
         av_seek_frame(fmt, idx, last, AVSEEK_FLAG_BACKWARD);
         if (A.c) avcodec_flush_buffers(A.c);
         V.skip_until = last;
@@ -820,6 +862,7 @@ static void do_seek(const struct acm_seek *s)
     int64_t ts = s->ms * 1000;
     if (av_seek_frame(fmt, -1, ts, AVSEEK_FLAG_BACKWARD) < 0) { reply_error(ACM_E_EOF, 0, "seek"); return; }
     av_frame_free(&pending);
+    clear_video_packets();
     for (int i = 0; i < aqn; i++) av_frame_free(&aq[i]);
     aqn = 0;
     if (V.c) { avcodec_flush_buffers(V.c); V.drained = 0; V.skip_until = AV_NOPTS_VALUE; }

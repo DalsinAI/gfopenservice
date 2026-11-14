@@ -70,8 +70,11 @@ and the event queue; the backend gets host pointers and posts events.
 - Video and sound use one worker session. The worker converts every source to
   stereo (including mono upmix). ACM_AUDIO copies raw interleaved big-endian
   S16 for the Amiga-side consumer and returns the exact byte count; PTS/position
-  is obtained separately through INFO and events. Direct ACAHI output is not
-  claimed by this step. Feeds, the CD, SELECT and TARGET are not in this step.
+  is obtained separately through INFO and events. An active consumer plays
+  audio that continues beyond video EOF, while an unread tail is abandoned
+  after a bounded grace so END cannot hang. Pulling audio ahead queues crossed
+  video packets instead of dropping them. Direct ACAHI output is not claimed
+  by this step. Feeds, the CD, SELECT and TARGET are not in this step.
 - The policy: `AC_ACMEDIA_DENY`, `AC_ACMEDIA_HWONLY` (tags, comma separated),
   `AC_ACMEDIA_HW=0`. CAPS reports it, and the host's hardware decoders once a
   worker has said what they are.
@@ -132,6 +135,8 @@ the stream.
 
 - the protocol's good and bad requests, and every clip: probe, frames to the
   end, the end twice, seek, the same frames again;
+- audio-first demux preserves every video packet, and the runtime delivers a
+  longer audio tail after video EOF while unread audio still reaches END;
 - the policy: a deny never opens a decoder;
 - crash, hang and leak: each ends as `ACM_E_DECODER` and the next session
   plays;
