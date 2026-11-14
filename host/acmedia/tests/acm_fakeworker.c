@@ -6,7 +6,7 @@
  * check passes; the real sandbox is the real worker's, tested by stage a.
  *
  * The source is a text line, "FAKE W H FRAMES FPS [TAG] [crash=K] [slots=N]
- * [hang=K]": a video stream of TAG (default H264), W x H, FRAMES frames at FPS,
+ * [hang=K] [bad=offset|height|pool]": a video stream of TAG (default H264), W x H, FRAMES frames at FPS,
  * YUV420P in the pool. Frame k's Y bytes are (k + y + x) & 255, its U k & 255
  * and its V ~k & 255, so the test can check what ACM_FRAME gave. crash=K
  * dies on the K-th frame (SIGSEGV), hang=K stops answering there. With
@@ -31,6 +31,7 @@
 static int sock = 3, srcfd = -1;
 static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4;
 static uint8_t *pool; static uint32_t slot_size; static int given[64];
+static char bad[16];
 static uint32_t k;                                   /* the next frame */
 static struct acm_info info;
 static int parsed, opened;
@@ -50,6 +51,7 @@ static int parse(void) {
     char *c = strstr(line, "crash="); if (c) crash_at = (uint32_t)atoi(c + 6);
     c = strstr(line, "hang="); if (c) hang_at = (uint32_t)atoi(c + 5);
     c = strstr(line, "slots="); if (c) { nslots = (uint32_t)atoi(c + 6); if (!nslots || nslots > 64) nslots = 4; }
+    c = strstr(line, "bad="); if (c) sscanf(c + 4, "%15s", bad);
     memset(&info, 0, sizeof info);
     info.container = ACM_TAG('M', 'K', 'V', ' ');
     info.nstreams = 1;
@@ -97,6 +99,8 @@ static void next(uint32_t want) {
     fr.offset[0] = 0; fr.pitch[0] = W; fr.rowbytes[0] = W; fr.rows[0] = H;
     fr.offset[1] = W * H; fr.pitch[1] = cw; fr.rowbytes[1] = cw; fr.rows[1] = ch;
     fr.offset[2] = W * H + cw * ch; fr.pitch[2] = cw; fr.rowbytes[2] = cw; fr.rows[2] = ch;
+    if (!strcmp(bad, "offset")) fr.offset[1] = slot_size;
+    if (!strcmp(bad, "height")) fr.height = H + 1;
     k++;
     acm_send(sock, ACM_A_FRAME, &fr, sizeof fr, NULL, 0, NULL, 0);
 }
@@ -124,6 +128,7 @@ int main(int argc, char **argv) {
             op.video = o->video == -2 ? -1 : 0; op.audio = -1; op.vpath = ACM_PATH_SW;
             op.width = W; op.height = H; op.pixfmt = ACM_PIX_YUV420P;
             op.slot_size = (W * H * 3 / 2 + 4095) & ~4095u; op.nslots = op.video < 0 ? 0 : nslots;
+            if (!strcmp(bad, "pool")) { op.slot_size = 0x40000000u; op.nslots = 2; }
             op.info = info;
             opened = op.video >= 0;
             acm_send(sock, ACM_A_OPENED, &op, sizeof op, NULL, 0, NULL, 0);
