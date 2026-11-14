@@ -140,6 +140,26 @@ the stream.
     sh tests/run_tests.sh           # all of them, on this host
     build/<arch>/acm_test bench FILE [--hw] [--copy] [--dmabuf] [--realtime]
 
+### Pi acscreen COPY acceptance
+
+With the approved acscreen software-frame build running on the Pi and its
+video socket enabled, this forces software decoding into the worker's sealed
+pool and exercises `ACV_COPY` rather than the default dma-buf route:
+
+    PORT=0                                      # the running AmiCradle instance
+    SOCK=/run/amicradle/acscreen-video-$PORT.sock
+    build/aarch64/acm_planetest build/aarch64/acmedia-worker \
+        tests/clips/h264-small.mkv --acscreen "$SOCK" --copy --frames 30 --verbose
+
+The receipt must identify `software COPY route` and `frames are COPY`, report
+`WELCOME copy=yes`, at least one `SHOWN` and (for 30 frames) at least one
+`DONE`, zero wrong-kind/composited/off-plane/dropped frames, and end exactly:
+
+    planetest: PASS software COPY frames through acscreen
+
+Omit `--copy` for the existing zero-copy dma-buf test; that remains the
+default and still ends `PASS zero-copy frames on acscreen's overlay plane`.
+
 `run_tests.sh` runs these:
 
 - the protocol's good and bad requests, and every clip: probe, frames to the
