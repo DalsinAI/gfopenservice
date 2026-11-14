@@ -104,7 +104,7 @@ static void file(const char *name, const char *text) {
 /* ---- a stand-in acscreen: each frame shown at once, the one before DONE; STATE off on demand ---- */
 static char vsock[100];
 static int vl = -1;
-static _Atomic int vframes, vhide, vfds_ok = 1, vrects, voff_req, voff_sent;
+static _Atomic int vframes, vcopies, vhide, vfds_ok = 1, vrects, voff_req, voff_sent;
 static void vsend(int c, uint32_t type, const void *b, uint32_t len) {
     uint8_t p[ACV_MAX_PACKET]; struct acv_hdr h = { ACV_MAGIC, type, len, 0 };
     memcpy(p, &h, sizeof h); if (len) memcpy(p + sizeof h, b, len);
@@ -135,17 +135,20 @@ static void *acscreen(void *a) {
                 int k = (int)((x->cmsg_len - CMSG_LEN(0)) / sizeof(int));
                 for (int i = 0; i < k; i++) { int fd; memcpy(&fd, CMSG_DATA(x) + sizeof(int) * (size_t)i, sizeof fd); close(fd); nf++; }
             }
-            if (h.type == ACV_HELLO) { struct acv_welcome w = { ACV_VERSION, 0, 1920, 1080, 60000, 640, 480, 1, 0, 0 }; vsend(c, ACV_WELCOME, &w, sizeof w); }
+            if (h.type == ACV_HELLO) { struct acv_welcome w = { ACV_VERSION, ACV_WF_COPY, 1920, 1080, 60000, 640, 480, 1, 0, 0 }; vsend(c, ACV_WELCOME, &w, sizeof w); }
             else if (h.type == ACV_RECT) vrects++;
             else if (h.type == ACV_HIDE) { vhide++; if (prev) { struct acv_done d = { prev, ACV_W_HIDDEN, 0 }; vsend(c, ACV_DONE, &d, sizeof d); prev = 0; } }
-            else if (h.type == ACV_FRAME) {
-                struct acv_frame f; memcpy(&f, b + sizeof h, sizeof f);
-                if (nf != (int)f.nobj || nf < 1) vfds_ok = 0;
+            else if (h.type == ACV_FRAME || h.type == ACV_COPY) {
+                uint64_t id; memcpy(&id, b + sizeof h, sizeof id);
+                if (h.type == ACV_FRAME) {
+                    struct acv_frame f; memcpy(&f, b + sizeof h, sizeof f);
+                    if (nf != (int)f.nobj || nf < 1) vfds_ok = 0;
+                } else { if (nf != 1) vfds_ok = 0; vcopies++; }
                 vframes++;
-                if (voff_sent) { struct acv_done d = { f.id, ACV_W_NOT_SHOWN, 0 }; vsend(c, ACV_DONE, &d, sizeof d); continue; }
-                struct acv_shown s = { f.id, 0, (uint32_t)vframes, 0 }; vsend(c, ACV_SHOWN, &s, sizeof s);
+                if (voff_sent) { struct acv_done d = { id, ACV_W_NOT_SHOWN, 0 }; vsend(c, ACV_DONE, &d, sizeof d); continue; }
+                struct acv_shown s = { id, 0, (uint32_t)vframes, 0 }; vsend(c, ACV_SHOWN, &s, sizeof s);
                 if (prev) { struct acv_done d = { prev, ACV_W_OK, 0 }; vsend(c, ACV_DONE, &d, sizeof d); }
-                prev = f.id;
+                prev = id;
                 if (voff_req && !voff_sent) {
                     struct acv_state st = { 0, ACV_W_NOT_SHOWN, 1920, 1080 }; vsend(c, ACV_STATE, &st, sizeof st); voff_sent = 1;
                     struct acv_done d = { prev, ACV_W_HIDDEN, 0 }; vsend(c, ACV_DONE, &d, sizeof d); prev = 0;
@@ -309,7 +312,7 @@ int main(int argc, char **argv) {
     file("short.fake", "FAKE 34 18 6 50 HEVC\n");
     file("junk.bin", "not a film\n");
     file("crash.fake", "FAKE 32 16 20 25 crash=3\n");
-    file("long.fake", "FAKE 64 48 100 25\n");
+    file("long.fake", "FAKE 64 48 100 25 soft=1\n");
     file("av.fake", "FAKE 64 48 10 25 audio=1\n");
     file("av-unread.fake", "FAKE 64 48 25 25 audio=1\n");
     uint8_t d[256], out[4096];
@@ -516,7 +519,8 @@ int main(int argc, char **argv) {
     CHECK(rd(out + 4 * ACM_IH_VROUTE) == ACMG_ROUTE_PLANE && count_ev(h, ACMG_EV_RECT, 0) == 0, "INFO: route PLANE");
     CHECK(B->control(B->ctx, 4, ACMG_CTL_PLAY, a4) == 0 && wait_ev(h, ACMG_EV_FRAME, &from, 3000, &e) >= 0, "frames shown on the plane (FRAME events)");
     usleep(150000);
-    CHECK(vframes >= 2 && vfds_ok && vrects >= 1, "acscreen got the frames, each with its dma-buf fd, and the rectangle (%d frames)", vframes);
+    CHECK(vframes >= 2 && vcopies >= 2 && vfds_ok && vrects >= 1,
+          "acscreen got software frames with the sealed pool fd, and the rectangle (%d frames, %d copies)", vframes, vcopies);
     int32_t onp = B->frame(B->ctx, 4, fb, sizeof fb, 64, ACMG_PIX_YUV420, 0, 0);
     CHECK(onp == ACM_E_AGAIN, "on the plane: nothing for ACM_FRAME (%d)", onp);
     a4[0] = 5 << 16 | 6; a4[1] = 100 << 16 | 80; a4[2] = 1;

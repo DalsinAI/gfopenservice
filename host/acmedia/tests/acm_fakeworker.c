@@ -6,12 +6,13 @@
  * check passes; the real sandbox is the real worker's, tested by stage a.
  *
  * The source is a text line, "FAKE W H FRAMES FPS [TAG] [crash=K] [slots=N]
- * [hang=K] [audio=1]": a video stream of TAG (default H264), W x H, FRAMES
+ * [hang=K] [audio=1] [soft=1]": a video stream of TAG (default H264), W x H, FRAMES
  * frames at FPS, YUV420P in the pool. audio=1 adds 8 kHz stereo S16. Frame k's
  * Y bytes are (k + y + x) & 255, its U k & 255
  * and its V ~k & 255, so the test can check what ACM_FRAME gave. crash=K
  * dies on the K-th frame (SIGSEGV), hang=K stops answering there. With
- * ACM_WANT_DMABUF the frame goes as a memfd standing in for a dma-buf
+ * ACM_WANT_DMABUF the frame goes as a memfd standing in for a dma-buf,
+ * unless soft=1 forces the pool route
  * (ACM_FF_DMABUF, NV12's fourcc), as the hardware path's do.
  * Anything else is ACM_E_FORMAT at PROBE and OPEN.
  * Team 6, 12 Nov 2026. MIT, Copyright (c) 2026 AmiCradle Team.
@@ -30,7 +31,7 @@
 #include "../src/acm_codecs.h"
 
 static int sock = 3, srcfd = -1;
-static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4, has_audio;
+static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4, has_audio, force_soft;
 static uint8_t *pool; static uint32_t slot_size; static int given[64];
 static uint32_t k, ak;                               /* the next video/audio data */
 static struct acm_info info;
@@ -52,6 +53,7 @@ static int parse(void) {
     c = strstr(line, "hang="); if (c) hang_at = (uint32_t)atoi(c + 5);
     c = strstr(line, "slots="); if (c) { nslots = (uint32_t)atoi(c + 6); if (!nslots || nslots > 64) nslots = 4; }
     has_audio = strstr(line, "audio=1") != NULL;
+    force_soft = strstr(line, "soft=1") != NULL;
     memset(&info, 0, sizeof info);
     info.container = ACM_TAG('M', 'K', 'V', ' ');
     info.nstreams = has_audio ? 2 : 1;
@@ -92,7 +94,7 @@ static void next(uint32_t want) {
     struct acm_frame fr;
     memset(&fr, 0, sizeof fr);
     fr.pts_ms = (int64_t)k * 1000 / fps; fr.width = W; fr.height = H; fr.path = ACM_PATH_SW;
-    if (want & ACM_WANT_DMABUF) {
+    if ((want & ACM_WANT_DMABUF) && !force_soft) {
         static uint32_t hwk;
         int fd = memfd_create("fake-dmabuf", MFD_CLOEXEC);
         if (fd < 0 || ftruncate(fd, (off_t)(W * H * 3 / 2 + 16))) { err(ACM_E_LIMIT, "memfd"); return; }

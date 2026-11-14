@@ -586,12 +586,13 @@ static void step(struct sess *s) {
     int64_t dt = pts - s->base_pts;
     uint64_t due = s->base_ns + (uint64_t)(dt > 0 ? dt : 0) * 1000000ull * 65536ull / rate;
 
-    if (s->plane && s->pl.on && (s->nf.flags & ACM_FF_DMABUF)) {
+    if (s->plane && s->pl.on) {
         /* acscreen shows it at its vblank; it gets it a frame's time ahead, and keeps one waiting */
         if (wait_until(s, due > 40000000ull ? due - 40000000ull : 0)) return;
         while (s->plane && acm_plane_inflight(&s->pl) >= 2) plane_events(s, 20);
         uint64_t id;
-        int r = s->plane ? acm_plane_send(&s->pl, &s->nf, s->fds, s->nfds, due, &id) : 1;
+        int r = s->nf.flags & ACM_FF_DMABUF ? acm_plane_send(&s->pl, &s->nf, s->fds, s->nfds, due, &id) :
+                                               acm_plane_send_copy(&s->pl, &s->w, &s->nf, due, &id);
         if (r == 0) {
             s->have = 0; s->nfds = 0;
             pthread_mutex_lock(&s->mu); s->pos_ms = pts; pthread_mutex_unlock(&s->mu);
@@ -599,9 +600,9 @@ static void step(struct sess *s) {
             return;
         }
         if (r < 0) { plane_events(s, 0); }
-        /* not sent: a dma-buf frame cannot go to ACM_FRAME; it goes back, and the next comes from the pool */
-        drop_next(s);
-        return;
+        /* A dma-buf frame cannot go to ACM_FRAME: give it back and ask for
+         * the pool form. A software frame simply falls through to the guest. */
+        if (s->nf.flags & ACM_FF_DMABUF) { drop_next(s); return; }
     }
     if (s->nf.flags & ACM_FF_DMABUF) { drop_next(s); return; }
 

@@ -18,7 +18,7 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 | `src/acm_broker.c` | The broker's side: start, check the lock-down, ask with a watchdog, give the frame pool. The runtime uses it in stage b |
 | `src/acm_proto.h` | The worker protocol, with ACMedia's error codes and codec tags (`acm_codecs.h`) |
 | `tests/acm_test.c`, `tests/run_tests.sh` | The host test harness |
-| `src/acm_plane.c`, `src/acvideo_proto.h` | The plane route (design 3.2): dma-buf frames to acscreen's video socket, frames sent back unshown returned for compositing (Team 6; the protocol is amicradle `appliance/acscreen/acvideo_proto.h`) |
+| `src/acm_plane.c`, `src/acvideo_proto.h` | The plane route (design 3.2): hardware dma-bufs and software-pool YUV frames to acscreen's video socket; acscreen copies software frames once into its own linear scanout BO (Team 6; the protocol is amicradle `appliance/acscreen/acvideo_proto.h`) |
 | `tests/acm_plane_test.c` | The plane route against a stand-in acscreen (no worker, FFmpeg or display) |
 | `tests/acm_planetest.c` | M4K step 2: the worker's dma-bufs on a KMS overlay plane (`--test-only`, `--writeback`, `--acscreen`); built where libdrm is |
 | `src/acm_runtime.c` → `libacmedia.so` | M4K step 4: the runtime's backend for the twelve ids (`acmedia_backend_v1`, `src/acmedia_service.h`, a copy of gfosmotherboards'). A worker per session and per probe, frames to acscreen's plane or to ACM_FRAME; no FFmpeg (Team 6) |
@@ -61,7 +61,8 @@ and the event queue; the backend gets host pointers and posts events.
 - ACM_CONTROL queues PLAY, PAUSE, STOP, SEEK, RATE, SETRECT for the session's
   thread; EVENTS and VOLUME are kept. Frames are paced by their pts from the
   moment PLAY lands.
-- PLANE: frames go to acscreen (`$AC_VIDEO_SOCK`) as dma-bufs a frame's time
+- PLANE: frames go to acscreen (`$AC_VIDEO_SOCK`) as dma-bufs, or from the
+  sealed software pool with one copy into acscreen's linear scanout BO, a frame's time
   ahead of their vblank. No acscreen, or acscreen turning the plane off: RECT,
   and the frames go to ACM_FRAME (route GUEST) until the RTG surface (stage c).
 - ACM_FRAME gives the newest due frame once, as YUV420 at its own size; other
