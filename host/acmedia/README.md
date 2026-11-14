@@ -18,6 +18,9 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 | `src/acm_broker.c` | The broker's side: start, check the lock-down, ask with a watchdog, give the frame pool. The runtime uses it in stage b |
 | `src/acm_proto.h` | The worker protocol, with ACMedia's error codes and codec tags (`acm_codecs.h`) |
 | `tests/acm_test.c`, `tests/run_tests.sh` | The host test harness |
+| `src/acm_plane.c`, `src/acvideo_proto.h` | The plane route (design 3.2): dma-buf frames to acscreen's video socket, frames sent back unshown returned for compositing (Team 6; the protocol is amicradle `appliance/acscreen/acvideo_proto.h`) |
+| `tests/acm_plane_test.c` | The plane route against a stand-in acscreen (no worker, FFmpeg or display) |
+| `tests/acm_planetest.c` | M4K step 2: the worker's dma-bufs on a KMS overlay plane (`--test-only`, `--writeback`, `--acscreen`); built where libdrm is |
 | `tests/gen_clips.sh`, `tests/gen_amiga.py`, `tests/clips/` | The test clips (CDXL, ILBM, 8SVX and the module are written by `gen_amiga.py` from the formats' definitions) |
 
 ## Building

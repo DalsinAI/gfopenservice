@@ -33,5 +33,7 @@ for f in h264-av.mp4 hevc-av.mp4 hevc-10bit.mkv mpg2-small.mpg; do
 done
 run fallback "$C/hevc-av.mp4"
 run fallback "$C/h264-av.mp4"
+# the plane route (acm_plane.c) against a stand-in acscreen
+echo "== acm_plane_test"; "$OUT/acm_plane_test" || { echo "FAILED: acm_plane_test"; fail=$((fail + 1)); }
 echo "run_tests: $fail failed"
 [ $fail = 0 ]
