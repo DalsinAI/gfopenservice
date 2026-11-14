@@ -7,7 +7,7 @@
  *
  * The source is a text line, "FAKE W H FRAMES FPS [TAG] [crash=K] [slots=N]
  * [hang=K] [audio=1]": a video stream of TAG (default H264), W x H, FRAMES
- * frames at FPS, YUV420P in the pool. audio=1 adds 8 kHz mono S16. Frame k's
+ * frames at FPS, YUV420P in the pool. audio=1 adds 8 kHz stereo S16. Frame k's
  * Y bytes are (k + y + x) & 255, its U k & 255
  * and its V ~k & 255, so the test can check what ACM_FRAME gave. crash=K
  * dies on the K-th frame (SIGSEGV), hang=K stops answering there. With
@@ -58,7 +58,7 @@ static int parse(void) {
     info.duration_ms = (int64_t)N * 1000 / fps;
     snprintf(info.container_name, sizeof info.container_name, "fake");
     info.s[0] = (struct acm_stream){ ACM_KIND_VIDEO, tag, 0, W, H, 8, fps, 1, 0, 0, { 'u', 'n', 'd', ' ' } };
-    if (has_audio) info.s[1] = (struct acm_stream){ ACM_KIND_AUDIO, ACM_T_PCM, 0, 0, 0, 16, 0, 0, 8000, 1, { 'u', 'n', 'd', ' ' } };
+    if (has_audio) info.s[1] = (struct acm_stream){ ACM_KIND_AUDIO, ACM_T_PCM, 0, 0, 0, 16, 0, 0, 8000, 2, { 'u', 'n', 'd', ' ' } };
     parsed = 1;
     return 1;
 }
@@ -75,14 +75,14 @@ static void next(uint32_t want) {
     if (want & ACM_WANT_AUDIO) {
         uint32_t total = N * 8000 / fps;
         if (!has_audio || ak >= total) { err(ACM_E_EOF, "audio end"); return; }
-        uint32_t frames = total - ak < 256 ? total - ak : 256;
+        uint32_t frames = total - ak < 128 ? total - ak : 128;
         uint8_t b[sizeof(struct acm_audio) + 512];
-        struct acm_audio a = { (int64_t)ak * 1000 / 8000, frames, 8000, 1, 0 };
+        struct acm_audio a = { (int64_t)ak * 1000 / 8000, frames, 8000, 2, 0 };
         memcpy(b, &a, sizeof a);
         int16_t *pcm = (int16_t *)(void *)(b + sizeof a);
-        for (uint32_t i = 0; i < frames; i++) pcm[i] = (int16_t)((ak + i) & 0x7fff);
+        for (uint32_t i = 0; i < frames; i++) pcm[2 * i] = pcm[2 * i + 1] = (int16_t)((ak + i) & 0x7fff);
         ak += frames;
-        acm_send(sock, ACM_A_AUDIO, b, (uint32_t)(sizeof a + frames * 2), NULL, 0, NULL, 0);
+        acm_send(sock, ACM_A_AUDIO, b, (uint32_t)(sizeof a + frames * 4), NULL, 0, NULL, 0);
         return;
     }
     if (k >= N) { err(ACM_E_EOF, "end"); return; }
@@ -143,7 +143,7 @@ int main(int argc, char **argv) {
             op.apath = op.audio >= 0 ? ACM_PATH_SW : ACM_PATH_NONE;
             op.width = W; op.height = H; op.pixfmt = ACM_PIX_YUV420P;
             op.slot_size = (W * H * 3 / 2 + 4095) & ~4095u; op.nslots = op.video < 0 ? 0 : nslots;
-            if (op.audio >= 0) { op.sample_rate = 8000; op.channels = 1; }
+            if (op.audio >= 0) { op.sample_rate = 8000; op.channels = 2; }
             op.info = info;
             opened = op.video >= 0 || op.audio >= 0;
             acm_send(sock, ACM_A_OPENED, &op, sizeof op, NULL, 0, NULL, 0);

@@ -218,7 +218,9 @@ static int real_file(const char *libpath, const char *worker, const char *clip) 
     int32_t r = B->open(B->ctx, 1, h, d, n, ACMG_ST_VIDEO | ACMG_ST_AUDIO, vt, at, 0, ACMG_OF_EVENTS_FRAME);
     if (r != ACM_PENDING || wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0) { fprintf(stderr, "real: OPEN failed (%d)\n", r); return 1; }
     r = B->info(B->ctx, 1, info, sizeof info);
-    if (r < 0 || rd(info + 4 * ACM_IH_VIDEO) == 0xffffffffu || rd(info + 4 * ACM_IH_AUDIO) == 0xffffffffu) {
+    uint32_t ai = rd(info + 4 * ACM_IH_AUDIO);
+    if (r < 0 || rd(info + 4 * ACM_IH_VIDEO) == 0xffffffffu || ai == 0xffffffffu ||
+        rd(info + 4 * (ACM_INFO_HEAD_LONGS + ai * ACM_INFO_STREAM_LONGS + ACM_IS_CHANNELS)) != 2) {
         fprintf(stderr, "real: INFO has no A/V streams (%d)\n", r); return 1;
     }
     uint32_t a4[4] = { 0, 0, 0, 0 };
@@ -241,7 +243,7 @@ static int real_file(const char *libpath, const char *worker, const char *clip) 
     for (size_t i = 0; i < 640u * 360u * 3u / 2u; i++) sum = sum * 33u + frame[i];
     free(frame);
     B->close(B->ctx, 1);
-    printf("acm_runtime_real: PASS video_pts=%d video_checksum=%08x audio_bytes=%d audio=48000Hz/S16/mono\n", vpts, sum, abytes);
+    printf("acm_runtime_real: PASS video_pts=%d video_checksum=%08x audio_bytes=%d audio=48000Hz/S16BE/stereo\n", vpts, sum, abytes);
     return 0;
 }
 
@@ -423,12 +425,16 @@ int main(int argc, char **argv) {
     B->info(B->ctx, 2, out, sizeof out);
     CHECK(rd(out + 4 * ACM_IH_VIDEO) == 0 && rd(out + 4 * ACM_IH_AUDIO) == 1 && rd(out + 4 * ACM_IH_AROUTE) == ACMG_ROUTE_GUEST,
           "INFO: video and guest audio; timing is separate from AUDIO");
+    CHECK(rd(out + 4 * (ACM_INFO_HEAD_LONGS + ACM_INFO_STREAM_LONGS + ACM_IS_CHANNELS)) == 2,
+          "INFO: guest audio is stereo");
     a4[0] = 0;
     CHECK(B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0, "A/V PLAY");
     int32_t abytes = ACM_E_AGAIN;
     for (int tries = 0; tries < 200 && abytes == ACM_E_AGAIN; tries++) { abytes = B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 8000); if (abytes == ACM_E_AGAIN) usleep(5000); }
-    CHECK(abytes == 512 && out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 1,
-          "AUDIO: 512 S16BE bytes (%d; %02x%02x,%02x%02x)", abytes, out[0], out[1], out[2], out[3]);
+    CHECK(abytes == 512 && out[0] == 0 && out[1] == 0 && out[2] == 0 && out[3] == 0 &&
+          out[4] == 0 && out[5] == 1 && out[6] == 0 && out[7] == 1,
+          "AUDIO: 512 paired S16BE stereo bytes (%d; %02x%02x/%02x%02x,%02x%02x/%02x%02x)",
+          abytes, out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7]);
     CHECK(wait_ev(0x102, ACMG_EV_FRAME, &from, 3000, &e) >= 0, "A/V video frame event");
     pts = B->frame(B->ctx, 2, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48);
     CHECK(pts >= 0 && frame_ok(fb, 64, 48, 64, (uint32_t)pts / 40), "A/V FRAME: decoded video at PTS %d", pts);

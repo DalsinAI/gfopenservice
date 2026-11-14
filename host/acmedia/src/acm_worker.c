@@ -583,8 +583,8 @@ static void do_open(const struct acm_open *o)
     }
     if (A.c) {
         a_rate = (uint32_t)A.c->sample_rate;
-        a_ch = A.c->ch_layout.nb_channels >= 2 ? 2 : 1;
-        AVChannelLayout out = a_ch == 2 ? (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO : (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
+        a_ch = 2;                                             /* ACM_PCM_S16BE_STEREO at the guest ABI */
+        AVChannelLayout out = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
         if (swr_alloc_set_opts2(&swr, &out, AV_SAMPLE_FMT_S16, (int)a_rate, &A.c->ch_layout, A.c->sample_fmt,
                                 A.c->sample_rate, 0, NULL) < 0 || swr_init(swr) < 0) {
             reply_error(ACM_E_NOCODEC, 0, "audio conversion");
@@ -593,6 +593,7 @@ static void do_open(const struct acm_open *o)
         op.apath = A.path;
         op.sample_rate = a_rate;
         op.channels = a_ch;
+        if ((uint32_t)A.idx < op.info.nstreams) op.info.s[A.idx].channels = a_ch;
     }
     acm_send(sock, ACM_A_OPENED, &op, sizeof op, NULL, 0, NULL, 0);
 }

@@ -19,10 +19,10 @@
  *
  * What M4K step 4 needs, and what it leaves:
  *   - video and sound from the same worker session. ACM_AUDIO copies the
- *     next signed-16-bit big-endian interleaved block and returns its byte
- *     count, as the guest ABI requires. Timing comes separately from INFO and
- *     events. The Amiga-side consumer owns output pacing; ACAHI is a later
- *     direct-output route.
+ *     next signed-16-bit big-endian stereo block and returns its byte count,
+ *     as the guest ABI requires. Timing comes separately from INFO and events.
+ *     The Amiga-side consumer owns output pacing; ACAHI is a later direct-
+ *     output route.
  *   - targets PLANE, GUEST and NONE. PLANE goes to acscreen's video socket
  *     ($AC_VIDEO_SOCK) as dma-bufs; with no acscreen, or while it says the
  *     plane is off, the frames go to ACM_FRAME instead (route GUEST) and a
@@ -498,7 +498,7 @@ static int step_audio(struct sess *s) {
     struct acm_audio a;
     memcpy(&a, buf, sizeof a);
     uint64_t bytes = (uint64_t)a.frames * a.channels * 2;
-    if (!a.frames || !a.sample_rate || !a.channels || bytes > sizeof s->abuf || len != sizeof a + bytes) return ACM_E_DECODER;
+    if (!a.frames || !a.sample_rate || a.channels != 2 || bytes > sizeof s->abuf || len != sizeof a + bytes) return ACM_E_DECODER;
     pthread_mutex_lock(&s->mu);
     s->ra = a;
     s->abytes = (uint32_t)bytes;
