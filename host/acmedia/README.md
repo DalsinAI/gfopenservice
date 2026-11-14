@@ -23,6 +23,7 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 | `tests/acm_planetest.c` | M4K step 2: the worker's dma-bufs on a KMS overlay plane (`--test-only`, `--writeback`, `--acscreen`); built where libdrm is |
 | `src/acm_runtime.c` → `libacmedia.so` | M4K step 4: the runtime's backend for the twelve ids (`acmedia_backend_v1`, `src/acmedia_service.h`, a copy of gfosmotherboards'). A worker per session and per probe, frames to acscreen's plane or to ACM_FRAME; no FFmpeg (Team 6) |
 | `src/acm_guest.h` | The guest ABI's numbers as the backend answers them, and the CAPS, INFO and RESULT block layouts (to go into amicradle-guest's `hostlib/acmedia/acmedia.h`) |
+| `src/acmedia_voice.h`, `ACMEDIA-VOICE-ABI.md` | Versioned shared PCM voice used by the direct ACAHI route; ACAudioMixer owns its consumed/played clock |
 | `tests/acm_runtime_test.c`, `tests/acm_fakeworker.c` | `libacmedia.so` loaded as the runtime loads it, against a stand-in worker (the protocol, made-up frames, no FFmpeg) and a stand-in acscreen |
 | `tests/gen_clips.sh`, `tests/gen_amiga.py`, `tests/clips/` | The test clips (CDXL, ILBM, 8SVX and the module are written by `gen_amiga.py` from the formats' definitions) |
 
@@ -59,8 +60,9 @@ and the event queue; the backend gets host pointers and posts events.
   runs the worker; PROBED, OPENED or ERROR follows. Nothing waits for a
   decoder on the emulation thread.
 - ACM_CONTROL queues PLAY, PAUSE, STOP, SEEK, RATE, SETRECT for the session's
-  thread; EVENTS and VOLUME are kept. Frames are paced by their pts from the
-  moment PLAY lands.
+  thread; EVENTS and VOLUME are kept. Guest-audio frames are paced by their
+  PTS from the moment PLAY lands. Direct ACAHI video is instead paced by the
+  mixer's latency-corrected PLAYED counter.
 - PLANE: frames go to acscreen (`$AC_VIDEO_SOCK`) as dma-bufs, or from the
   sealed software pool with one copy into acscreen's linear scanout BO, a frame's time
   ahead of their vblank. No acscreen, or acscreen turning the plane off: RECT,
@@ -77,8 +79,16 @@ and the event queue; the backend gets host pointers and posts events.
   An active consumer plays
   audio that continues beyond video EOF, while an unread tail is abandoned
   after a bounded grace so END cannot hang. Pulling audio ahead queues crossed
-  video packets with bounded back-pressure instead of dropping them. Direct ACAHI output is not claimed
-  by this step. Feeds, the CD, SELECT and TARGET are not in this step.
+  video packets with bounded back-pressure instead of dropping them.
+- ACMG_OUT_ACAHI creates `/dev/shm/amicradle-acmedia-PORT-HANDLE.acmv`
+  (`AC_MIXER_RINGS` overrides the directory). The worker converts stereo S16
+  to 44.1 kHz; the producer never overwrites unread frames. ACAudioMixer owns
+  READ, PLAYED and LATENCY. PLAY/PAUSE, VOLUME and SEEK map to the shared
+  PAUSED, GAIN_Q16 and GENERATION fields. PLAYED is the audio master: video is
+  held when more than 40 ms ahead and discarded when more than 100 ms late.
+  The ring disappears at CLOSE. See `ACMEDIA-VOICE-ABI.md`. Physical output
+  latency and long-run A/V drift still require Pi 5 and desktop calibration.
+  Feeds, the CD, SELECT and TARGET are not in this step.
 - The policy: `AC_ACMEDIA_DENY`, `AC_ACMEDIA_HWONLY` (tags, comma separated),
   `AC_ACMEDIA_HW=0`. CAPS reports it, and the host's hardware decoders once a
   worker has said what they are.

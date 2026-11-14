@@ -22,7 +22,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -31,6 +33,7 @@
 #include "../src/acm_proto.h"
 #include "../src/acm_codecs.h"
 #include "../src/acvideo_proto.h"
+#include "../src/acmedia_voice.h"
 #include "../src/acmedia_service.h"
 
 static int pass, fail;
@@ -251,6 +254,83 @@ static int real_file(const char *libpath, const char *worker, const char *clip) 
     return 0;
 }
 
+/* The real worker through the direct ACAHI producer. A stand-in mixer drains
+ * the shared ring and advances PLAYED; this proves resampling and the actual
+ * producer contract, but not an audio device's physical latency. */
+static int real_acahi(const char *libpath, const char *worker, const char *clip) {
+    char name[512], rings[] = "/tmp/acmvoiceXXXXXX";
+    if (!mkdtemp(rings)) { perror("mkdtemp"); return 1; }
+    real_mode = 1;
+    snprintf(real_dir, sizeof real_dir, "%s", clip);
+    char *sl = strrchr(real_dir, '/');
+    if (!sl) { snprintf(name, sizeof name, "%s", clip); snprintf(real_dir, sizeof real_dir, "."); }
+    else { snprintf(name, sizeof name, "%s", sl + 1); *sl = 0; }
+    setenv("AC_ACMEDIA_WORKER", worker, 1);
+    setenv("AC_ACMEDIA_HW", "0", 1);
+    setenv("AC_MIXER_RINGS", rings, 1);
+    /* An exact gfosmotherboards mixer may be supplied for a cross-repository
+     * regression. Without it, this test remains self-contained and advances
+     * the mixer-owned counters itself. */
+    pid_t mixer = -1;
+    const char *mixer_exe = getenv("AC_MIXER_EXE");
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
+    acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
+    if (!entry || !(B = entry(&host))) { fprintf(stderr, "real-acahi: libacmedia unavailable: %s\n", dlerror()); rmdir(rings); return 1; }
+    uint8_t d[1024], at[32] = { 0 }, info[4096]; be(at, ACMG_OUT_ACAHI);
+    uint32_t h = 0x101, n = srcd(d, name), a4[4] = { 0 };
+    int from = nev_now(); struct ev e;
+    int32_t r = B->open(B->ctx, 1, h, d, n, ACMG_ST_AUDIO, NULL, at, 59921, 0);
+    if (r != ACM_PENDING || wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0) {
+        fprintf(stderr, "real-acahi: OPEN failed (%d)\n", r); rmdir(rings); return 1;
+    }
+    B->info(B->ctx, 1, info, sizeof info);
+    char path[256]; snprintf(path, sizeof path, "%s/amicradle-acmedia-59921-%u.acmv", rings, h);
+    int fd = open(path, O_RDWR | O_CLOEXEC); struct stat st;
+    if (fd < 0 || fstat(fd, &st)) { fprintf(stderr, "real-acahi: no voice\n"); B->close(B->ctx, 1); rmdir(rings); return 1; }
+    uint8_t *v = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0); close(fd);
+    if (v == MAP_FAILED || acmv_u32(v, ACMV_O_RATE) != 44100 || rd(info + 4 * ACM_IH_AROUTE) != ACMG_ROUTE_ACAHI) {
+        fprintf(stderr, "real-acahi: voice contract failed\n"); B->close(B->ctx, 1); rmdir(rings); return 1;
+    }
+    if (mixer_exe && *mixer_exe) {
+        mixer = fork();
+        if (!mixer) {
+            char state[600];
+            snprintf(state, sizeof state, "%s/state.json", rings);
+            execl(mixer_exe, mixer_exe, "--port", "0", "--state", state, (char *)NULL);
+            _exit(127);
+        }
+    }
+    if ((mixer_exe && *mixer_exe && mixer < 0) || B->control(B->ctx, 1, ACMG_CTL_PLAY, a4)) {
+        fprintf(stderr, "real-acahi: mixer/PLAY failed\n");
+        if (mixer >= 0) { kill(mixer, SIGTERM); waitpid(mixer, NULL, 0); }
+        munmap(v, (size_t)st.st_size); B->close(B->ctx, 1); rmdir(rings); return 1;
+    }
+    uint64_t deadline = ms_now() + 15000, write = 0;
+    while (ms_now() < deadline && !count_ev(h, ACMG_EV_END, 0)) {
+        write = acmv_u64(v, ACMV_O_WRITE);
+        if (mixer < 0) {
+            acmv_put_u64(v, ACMV_O_READ, write);
+            acmv_put_u64(v, ACMV_O_PLAYED, write);
+        }
+        usleep(1000);
+    }
+    write = acmv_u64(v, ACMV_O_WRITE);
+    uint64_t played = acmv_u64(v, ACMV_O_PLAYED), latency = acmv_u64(v, ACMV_O_LATENCY);
+    int ended = count_ev(h, ACMG_EV_END, 0) != 0;
+    int eof = (acmv_u32(v, ACMV_O_FLAGS) & ACMV_F_EOF) != 0;
+    munmap(v, (size_t)st.st_size);
+    B->close(B->ctx, 1);
+    deadline = ms_now() + 2000; while (!access(path, F_OK) && ms_now() < deadline) usleep(1000);
+    int gone = access(path, F_OK) != 0;
+    if (mixer >= 0) { kill(mixer, SIGTERM); waitpid(mixer, NULL, 0); }
+    rmdir(rings);
+    int clocked = mixer < 0 || (played > 0 && latency > 0);
+    printf("acm_runtime_real_acahi%s: %s write=%llu played=%llu latency=%llu end=%d eof=%d gone=%d\n",
+           mixer_exe && *mixer_exe ? "_mixer" : "", ended && eof && gone && write > 44100 && clocked ? "PASS" : "FAIL",
+           (unsigned long long)write, (unsigned long long)played, (unsigned long long)latency, ended, eof, gone);
+    return !(ended && eof && gone && write > 44100 && clocked);
+}
+
 /* The review stress case through the public backend: consume audio as fast
  * as offered while video stays on its real-time clock. Read-ahead must be
  * back-pressured, not overflow the worker's crossed-video queue. */
@@ -311,9 +391,10 @@ static int real_flow(const char *libpath, const char *worker, const char *clip, 
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real[-acahi] FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
     signal(SIGPIPE, SIG_IGN);
     if (argc == 5 && !strcmp(argv[3], "--real")) return real_file(argv[1], argv[2], argv[4]);
+    if (argc == 5 && !strcmp(argv[3], "--real-acahi")) return real_acahi(argv[1], argv[2], argv[4]);
     if (argc == 7 && !strcmp(argv[3], "--real-flow"))
         return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 0, 0);
     if (argc == 7 && !strcmp(argv[3], "--real-flow-paced"))
@@ -337,6 +418,7 @@ int main(int argc, char **argv) {
 
     setenv("AC_ACMEDIA_WORKER", argv[2], 1);
     setenv("AC_VIDEO_SOCK", vsock, 1);
+    setenv("AC_MIXER_RINGS", dir, 1);
     setenv("AC_ACMEDIA_DENY", "AV1", 1);
     setenv("AC_ACMEDIA_HWONLY", "VP9", 1);
     void *lib = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
@@ -549,8 +631,73 @@ int main(int argc, char **argv) {
           B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0 && wait_ev(0x102, ACMG_EV_END, &from, 3000, &e) >= 0,
           "A/V END is independent of whether the guest reads audio");
     B->close(B->ctx, 2);
+    /* Direct ACAHI: the producer owns a bounded 44.1-kHz voice; the mixer
+     * owns READ/PLAYED. Controls are visible in its versioned header. */
     uint8_t ahi[32] = { 0 }; be(ahi, ACMG_OUT_ACAHI);
-    CHECK(B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_AUDIO, NULL, ahi, 0, 0) == ACM_E_FORMAT, "direct ACAHI route is not claimed");
+    from = nev_now();
+    an = srcd(d, "av-unread.fake");
+    uint32_t ah = 0x202;
+    r = B->open(B->ctx, 2, ah, d, an, ACMG_ST_AUDIO, NULL, ahi, 59911, 0);
+    CHECK(r == ACM_PENDING && wait_ev(ah, ACMG_EV_OPENED, &from, 5000, &e) >= 0, "direct ACAHI OPENED");
+    char vp[256]; snprintf(vp, sizeof vp, "%s/amicradle-acmedia-59911-%u.acmv", dir, ah);
+    int vfd = open(vp, O_RDWR | O_CLOEXEC);
+    struct stat vst;
+    CHECK(vfd >= 0 && !fstat(vfd, &vst) && vst.st_size > ACMV_HEADER_BYTES, "direct ACAHI voice exists");
+    uint8_t *vm = vfd >= 0 ? mmap(NULL, (size_t)vst.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, vfd, 0) : MAP_FAILED;
+    if (vfd >= 0) close(vfd);
+    CHECK(vm != MAP_FAILED && acmv_u32(vm, ACMV_O_MAGIC) == ACMV_MAGIC && acmv_u32(vm, ACMV_O_VERSION) == 1 &&
+          acmv_u32(vm, ACMV_O_RATE) == 44100 && acmv_u32(vm, ACMV_O_CHANNELS) == 2 &&
+          acmv_u32(vm, ACMV_O_FLAGS) == ACMV_F_PAUSED, "direct ACAHI v1 header, paused at open");
+    B->info(B->ctx, 2, out, sizeof out);
+    CHECK(rd(out + 4 * ACM_IH_AROUTE) == ACMG_ROUTE_ACAHI && B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 44100) == ACM_E_FORMAT,
+          "INFO says ACAHI and ACM_AUDIO does not duplicate it");
+    a4[0] = 32768;
+    CHECK(B->control(B->ctx, 2, ACMG_CTL_VOLUME, a4) == 0 && acmv_u32(vm, ACMV_O_GAIN_Q16) == 32768, "VOLUME is voice Q16 gain");
+    a4[0] = 0;
+    CHECK(B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0, "direct ACAHI PLAY");
+    uint64_t vd = ms_now() + 3000;
+    while (acmv_u64(vm, ACMV_O_WRITE) == 0 && ms_now() < vd) usleep(1000);
+    CHECK(acmv_u64(vm, ACMV_O_WRITE) > 0 && !(acmv_u32(vm, ACMV_O_FLAGS) & ACMV_F_PAUSED), "worker PCM reaches the bounded voice");
+    CHECK(B->control(B->ctx, 2, ACMG_CTL_PAUSE, a4) == 0, "direct ACAHI PAUSE");
+    vd = ms_now() + 1000;
+    while (!(acmv_u32(vm, ACMV_O_FLAGS) & ACMV_F_PAUSED) && ms_now() < vd) usleep(1000);
+    CHECK(acmv_u32(vm, ACMV_O_FLAGS) & ACMV_F_PAUSED, "PAUSE freezes the voice clock");
+    uint32_t vg = acmv_u32(vm, ACMV_O_GENERATION);
+    a4[0] = 200; a4[1] = ACMG_SEEK_EXACT;
+    CHECK(B->control(B->ctx, 2, ACMG_CTL_SEEK, a4) == 0, "direct ACAHI SEEK");
+    vd = ms_now() + 1000;
+    while (acmv_u32(vm, ACMV_O_GENERATION) == vg && ms_now() < vd) usleep(1000);
+    CHECK(acmv_u32(vm, ACMV_O_GENERATION) != vg && acmv_u64(vm, ACMV_O_ORIGIN_NS) == 200000000ull &&
+          acmv_u64(vm, ACMV_O_WRITE) == acmv_u64(vm, ACMV_O_READ), "SEEK resets queued history and generation");
+    munmap(vm, (size_t)vst.st_size);
+    B->close(B->ctx, 2);
+    vd = ms_now() + 2000;
+    while (!access(vp, F_OK) && ms_now() < vd) usleep(1000);
+    CHECK(access(vp, F_OK) != 0, "CLOSE removes the direct voice");
+
+    /* The latency-corrected PLAYED counter paces video, not wall time. With
+     * PLAYED held at zero, at most the 0/40 ms frames may be presented. */
+    from = nev_now();
+    an = srcd(d, "av.fake");
+    ah = 0x302;
+    r = B->open(B->ctx, 2, ah, d, an, ACMG_ST_VIDEO | ACMG_ST_AUDIO, gtarget, ahi, 59912, ACMG_OF_EVENTS_FRAME);
+    CHECK(r == ACM_PENDING && wait_ev(ah, ACMG_EV_OPENED, &from, 5000, &e) >= 0 && B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0,
+          "direct ACAHI A/V opens and plays");
+    snprintf(vp, sizeof vp, "%s/amicradle-acmedia-59912-%u.acmv", dir, ah);
+    vfd = open(vp, O_RDWR | O_CLOEXEC); fstat(vfd, &vst);
+    vm = mmap(NULL, (size_t)vst.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, vfd, 0); close(vfd);
+    vd = ms_now() + 2000;
+    while (acmv_u64(vm, ACMV_O_WRITE) < 16000 && ms_now() < vd) usleep(1000);
+    int held_frames = count_ev(ah, ACMG_EV_FRAME, from);
+    CHECK(held_frames <= 2, "video waits within 40 ms of PLAYED (%d frames)", held_frames);
+    int advance_from = nev_now();
+    uint64_t voice_write = acmv_u64(vm, ACMV_O_WRITE);
+    acmv_put_u64(vm, ACMV_O_READ, voice_write); acmv_put_u64(vm, ACMV_O_PLAYED, voice_write);
+    CHECK(wait_ev(ah, ACMG_EV_FRAME, &advance_from, 2000, &e) >= 0 && e.a >= 280,
+          "PLAYED advances video and frames over 100 ms late are dropped (PTS %u)", e.a);
+    munmap(vm, (size_t)vst.st_size);
+    B->close(B->ctx, 2);
+
     CHECK(B->open(B->ctx, 2, 0x102, d, srcd(d, "missing.fake"), ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_IO, "a missing source: ACM_E_IO at once");
     from = nev_now();
     h = opened(2, 3, "junk.bin", gtarget, 0, &r);
