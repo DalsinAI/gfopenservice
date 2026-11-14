@@ -8,7 +8,8 @@
  * byte, END, a worker that crashes (ERROR, DECODER, FAULT's line, the next
  * session plays), CLOSE while playing, and no worker left behind.
  *
- *   acm_runtime_test LIBACMEDIA FAKEWORKER
+ *   acm_runtime_test LIBACMEDIA FAKEWORKER [--real FILE]
+ *   acm_runtime_test LIBACMEDIA WORKER --real-flow FILE FRAMES SAMPLES
  * Team 6, 12 Nov 2026. MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
@@ -250,10 +251,65 @@ static int real_file(const char *libpath, const char *worker, const char *clip) 
     return 0;
 }
 
+/* The review stress case through the public backend: consume audio as fast
+ * as offered while video stays on its real-time clock. Read-ahead must be
+ * back-pressured, not overflow the worker's crossed-video queue. */
+static int real_flow(const char *libpath, const char *worker, const char *clip, int want_frames, int want_samples) {
+    char name[512];
+    real_mode = 1;
+    snprintf(real_dir, sizeof real_dir, "%s", clip);
+    char *sl = strrchr(real_dir, '/');
+    if (!sl) { snprintf(name, sizeof name, "%s", clip); snprintf(real_dir, sizeof real_dir, "."); }
+    else { snprintf(name, sizeof name, "%s", sl + 1); *sl = 0; }
+    setenv("AC_ACMEDIA_WORKER", worker, 1);
+    setenv("AC_ACMEDIA_HW", "0", 1);
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
+    acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
+    if (!entry || !(B = entry(&host))) { fprintf(stderr, "real-flow: libacmedia unavailable: %s\n", dlerror()); return 1; }
+    uint8_t d[1024], vt[32] = { 0 }, at[32] = { 0 }, pcm[ACM_MSG_MAX];
+    be(vt, ACMG_OUT_GUEST); be(at, ACMG_OUT_GUEST);
+    uint32_t h = 0x101, n = srcd(d, name), a4[4] = { 0 };
+    int from = nev_now(), event_start = from;
+    struct ev e;
+    int32_t r = B->open(B->ctx, 1, h, d, n, ACMG_ST_VIDEO | ACMG_ST_AUDIO, vt, at, 0, ACMG_OF_EVENTS_FRAME);
+    if (r != ACM_PENDING || wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0 || B->control(B->ctx, 1, ACMG_CTL_PLAY, a4)) {
+        fprintf(stderr, "real-flow: OPEN/PLAY failed (%d)\n", r); return 1;
+    }
+    int samples = 0, ended = 0, failed = 0;
+    uint64_t deadline = ms_now() + (uint64_t)(want_frames > 0 ? want_frames * 1000 / 20 + 30000 : 60000);
+    while (ms_now() < deadline && !ended && !failed) {
+        r = B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 0);
+        if (r > 0) samples += r / 4;
+        else if (r != ACM_E_AGAIN && r != ACM_E_EOF) failed = r;
+        pthread_mutex_lock(&emu);
+        for (int i = event_start; i < nev; i++) if (evs[i].h == h) {
+            if (evs[i].type == ACMG_EV_END) ended = 1;
+            if (evs[i].type == ACMG_EV_ERROR) failed = (int32_t)evs[i].a;
+        }
+        pthread_mutex_unlock(&emu);
+        if (r == ACM_E_AGAIN) usleep(500);
+    }
+    /* END may be posted with the final PCM blocks still waiting for the guest. */
+    uint64_t drain_deadline = ms_now() + 5000;
+    for (;;) {
+        r = B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 0);
+        if (r > 0) { samples += r / 4; continue; }
+        if (r == ACM_E_AGAIN && ms_now() < drain_deadline) { usleep(500); continue; }
+        break;
+    }
+    int frames = count_ev(h, ACMG_EV_FRAME, event_start);
+    B->close(B->ctx, 1);
+    printf("acm_runtime_real_flow: %d/%d frames, %d/%d samples, end=%d error=%d\n",
+           frames, want_frames, samples, want_samples, ended, failed);
+    return !ended || failed || frames != want_frames || samples != want_samples;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-flow FILE FRAMES SAMPLES]\n"); return 2; }
     signal(SIGPIPE, SIG_IGN);
     if (argc == 5 && !strcmp(argv[3], "--real")) return real_file(argv[1], argv[2], argv[4]);
+    if (argc == 7 && !strcmp(argv[3], "--real-flow"))
+        return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]));
     snprintf(dir, sizeof dir, "/tmp/acmrtXXXXXX");
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
     snprintf(vsock, sizeof vsock, "%s/video.sock", dir);
@@ -425,6 +481,13 @@ int main(int argc, char **argv) {
     be(atarget, ACMG_OUT_GUEST);
     from = nev_now();
     uint32_t an = srcd(d, "av.fake");
+    r = B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_VIDEO | ACMG_ST_AUDIO, gtarget, NULL, 0, 0);
+    CHECK(r == ACM_PENDING && wait_ev(0x102, ACMG_EV_OPENED, &from, 5000, &e) >= 0, "A/V request without an audio target opens video only");
+    B->info(B->ctx, 2, out, sizeof out);
+    CHECK(rd(out + 4 * ACM_IH_VIDEO) == 0 && rd(out + 4 * ACM_IH_AUDIO) == 0xffffffffu && rd(out + 4 * ACM_IH_AROUTE) == ACMG_ROUTE_NONE,
+          "no audio target means no audio route");
+    B->close(B->ctx, 2);
+    from = nev_now();
     r = B->open(B->ctx, 2, 0x102, d, an, ACMG_ST_VIDEO | ACMG_ST_AUDIO, gtarget, atarget, 0, ACMG_OF_EVENTS_FRAME);
     CHECK(r == ACM_PENDING && wait_ev(0x102, ACMG_EV_OPENED, &from, 5000, &e) >= 0, "A/V OPENED");
     B->info(B->ctx, 2, out, sizeof out);

@@ -69,11 +69,15 @@ and the event queue; the backend gets host pointers and posts events.
   formats and sizes are ACM_E_FORMAT until stage c.
 - Video and sound use one worker session. The worker converts every source to
   stereo (including mono upmix). ACM_AUDIO copies raw interleaved big-endian
-  S16 for the Amiga-side consumer and returns the exact byte count; PTS/position
-  is obtained separately through INFO and events. An active consumer plays
+  S16 for the Amiga-side consumer and returns the exact byte count. The worker's
+  audio PTS bounds read-ahead against the due video position, but guest ABI v1
+  has no per-block PTS: INFO/events expose the video clock, and an audio-only
+  consumer can only count samples since OPEN or SEEK. That count cannot describe
+  a source timestamp gap; adding the PTS to the guest contract is still required.
+  An active consumer plays
   audio that continues beyond video EOF, while an unread tail is abandoned
   after a bounded grace so END cannot hang. Pulling audio ahead queues crossed
-  video packets instead of dropping them. Direct ACAHI output is not claimed
+  video packets with bounded back-pressure instead of dropping them. Direct ACAHI output is not claimed
   by this step. Feeds, the CD, SELECT and TARGET are not in this step.
 - The policy: `AC_ACMEDIA_DENY`, `AC_ACMEDIA_HWONLY` (tags, comma separated),
   `AC_ACMEDIA_HW=0`. CAPS reports it, and the host's hardware decoders once a
@@ -89,6 +93,11 @@ checked-in H.264/AAC clip:
 
     build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
         build/$(uname -m)/acmedia-worker-system --real "$PWD/tests/clips/h264-av.mp4"
+
+`acm_test avflow FILE` first counts each stream alone, then verifies the exact
+same frame/sample counts when video and audio alternately fill the bounded
+cross-stream queues. `acm_runtime_test ... --real-flow FILE FRAMES SAMPLES`
+does the matching fast-audio-reader test through the public backend.
 
 ## The worker
 
@@ -150,10 +159,14 @@ the stream.
 ## Licences
 
 Our code here is MIT, as the rest of gfopenservice. `make system` dynamically
-links the host's libavformat, libavcodec, libswresample, libswscale and
-libavutil. The host package's build configuration and licence are the receipt
-for that worker; no FFmpeg binary or source is copied into this repository,
-GFOS, a pack or a ROM.
+links the FFmpeg version supplied by the supported Debian-family host (Ubuntu
+on the PC build host; Raspberry Pi OS on the card): libavformat, libavcodec,
+libswresample, libswscale and libavutil. With `ACM_VERBOSE=1`, the worker prints
+the loaded FFmpeg version, licence and complete configuration before sandboxing;
+`ffmpeg -version` and `apt-cache policy ffmpeg` name the distribution package.
+Its corresponding source is obtained from that distribution with `apt source
+ffmpeg` (after enabling its source-package repository). No FFmpeg binary or
+source is copied into this repository, GFOS, a pack or a ROM by `make system`.
 
 The pinned Pi validation worker links:
 

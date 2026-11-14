@@ -20,7 +20,9 @@
  * What M4K step 4 needs, and what it leaves:
  *   - video and sound from the same worker session. ACM_AUDIO copies the
  *     next signed-16-bit big-endian stereo block and returns its byte count,
- *     as the guest ABI requires. Timing comes separately from INFO and events.
+ *     as the guest ABI requires. The worker's audio PTS is retained internally
+ *     to bound read-ahead, but ABI v1 has no per-block PTS field; INFO/events
+ *     expose the due video position only.
  *     The Amiga-side consumer owns output pacing; ACAHI is a later direct-
  *     output route.
  *   - targets PLANE, GUEST and NONE. PLANE goes to acscreen's video socket
@@ -70,6 +72,7 @@ uint32_t acm_tag_parse(const char *s);
 #define RT_QUEUE 16
 #define RT_AUDIO_QUEUE 8             /* about 170 ms at the worker's usual 1024/48 kHz blocks */
 #define RT_AUDIO_IDLE_NS 500000000ull /* abandon only an unread tail, not active playback */
+#define RT_AUDIO_AHEAD_MS 500         /* bound a buffering guest ahead of due video */
 #define RT_NEXT_MS 10000              /* the watchdog on one frame */
 #define RT_ASK_MS 2000
 
@@ -127,6 +130,7 @@ struct sess {
     int based;
     int veof, aeof;
     uint64_t veof_ns, audio_read_ns;
+    int64_t audio_until_ms;
 };
 
 struct probe {
@@ -430,6 +434,7 @@ static void seek_to(struct sess *s, int64_t ms, uint32_t flags) {
     s->aqh = s->aqn = 0;
     s->veof = s->aeof = 0;
     s->veof_ns = s->audio_read_ns = 0;
+    s->audio_until_ms = ms;
     if (!r) { s->pos_ms = ms; if (s->state == ACM_STATE_ENDED) s->state = ACM_STATE_PAUSED; }
     int dead = s->w.dead;
     pthread_mutex_unlock(&s->mu);
@@ -499,8 +504,8 @@ static int wait_until(struct sess *s, uint64_t t) {
 /* One frame further while playing: get it, wait for its time, show it. */
 /* Fetch one audio block when the guest has consumed the previous one. Video
  * pacing never waits for the guest's audio copy. The worker's PTS stays with
- * the block internally; the guest reads timing separately through INFO and
- * events, while ACM_AUDIO returns the copied byte count. */
+ * the block internally and bounds audio read-ahead; ABI v1's ACM_AUDIO returns
+ * only the copied byte count. */
 static int step_audio(struct sess *s) {
     pthread_mutex_lock(&s->mu);
     /* Once video has ended, unread sound must not hold END forever. An
@@ -513,7 +518,8 @@ static int step_audio(struct sess *s) {
             s->aqn--;
         }
     }
-    int need = s->op.audio >= 0 && s->aqn < RT_AUDIO_QUEUE && !s->aeof;
+    int ahead = s->op.video >= 0 && !s->veof && s->audio_until_ms > s->pos_ms + RT_AUDIO_AHEAD_MS;
+    int need = s->op.audio >= 0 && s->aqn < RT_AUDIO_QUEUE && !s->aeof && !ahead;
     pthread_mutex_unlock(&s->mu);
     if (!need) return 0;
     static __thread uint8_t buf[ACM_MSG_MAX];
@@ -522,18 +528,23 @@ static int step_audio(struct sess *s) {
                     &t, buf, sizeof buf, &len, NULL, NULL, RT_NEXT_MS);
     if (!r && t != ACM_A_AUDIO) r = acm_err(t, buf, ACM_E_DECODER);
     if (r == ACM_E_EOF) { pthread_mutex_lock(&s->mu); s->aeof = 1; pthread_mutex_unlock(&s->mu); return 0; }
+    if (r == ACM_E_AGAIN) return 0;
     if (r) return r;
     if (len < sizeof(struct acm_audio)) return ACM_E_DECODER;
     struct acm_audio a;
     memcpy(&a, buf, sizeof a);
     uint64_t bytes = (uint64_t)a.frames * a.channels * 2;
-    if (!a.frames || !a.sample_rate || a.channels != 2 || bytes > sizeof s->aq[0].data || len != sizeof a + bytes) return ACM_E_DECODER;
+    if (!a.frames || a.sample_rate != s->op.sample_rate || a.channels != 2 || bytes > sizeof s->aq[0].data || len != sizeof a + bytes)
+        return ACM_E_DECODER;
     pthread_mutex_lock(&s->mu);
     struct audio_block *q = &s->aq[(s->aqh + s->aqn) % RT_AUDIO_QUEUE];
     q->a = a;
     q->bytes = (uint32_t)bytes;
     memcpy(q->data, buf + sizeof a, (size_t)bytes);
     s->aqn++;
+    int64_t end = a.pts_ms >= 0 ? a.pts_ms : s->audio_until_ms;
+    end += (int64_t)(((uint64_t)a.frames * 1000 + a.sample_rate - 1) / a.sample_rate);
+    if (end > s->audio_until_ms) s->audio_until_ms = end;
     pthread_mutex_unlock(&s->mu);
     return 0;
 }
@@ -692,7 +703,7 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     if (!slot || slot > ACM_SVC_SESSIONS) return ACM_E_BADARG;
     if (!(streams & (ACMG_ST_VIDEO | ACMG_ST_AUDIO)) || (streams & ~(ACMG_ST_VIDEO | ACMG_ST_AUDIO))) return ACM_E_FORMAT;
     uint32_t vk = video ? rd(video) : ACMG_OUT_NONE;
-    uint32_t ak = audio ? rd(audio) : (streams & ACMG_ST_AUDIO ? ACMG_OUT_GUEST : ACMG_OUT_NONE);
+    uint32_t ak = audio ? rd(audio) : ACMG_OUT_NONE;
     if (vk == ACMG_OUT_RTG_SURFACE || vk == ACMG_OUT_CHIPSET) return ACM_E_FORMAT;   /* stage c */
     if (vk != ACMG_OUT_NONE && vk != ACMG_OUT_PLANE && vk != ACMG_OUT_GUEST) return ACM_E_BADARG;
     if (ak != ACMG_OUT_NONE && ak != ACMG_OUT_GUEST) return ak == ACMG_OUT_ACAHI ? ACM_E_FORMAT : ACM_E_BADARG;
