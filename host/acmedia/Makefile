@@ -25,7 +25,14 @@ DRMCF  := $(shell pkg-config --cflags libdrm 2>/dev/null)
 DRMLIB := $(shell pkg-config --libs libdrm 2>/dev/null)
 PLANETEST := $(if $(DRMLIB),$(OUT)/acm_planetest)
 
-all: $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(OUT)/acm_plane_test $(PLANETEST)
+# libacmedia.so, the runtime's backend (M4K step 4), and its test against a stand-in worker: no FFmpeg either
+RSRC = src/acm_runtime.c $(BSRC)
+RUNTIME = $(OUT)/libacmedia.so $(OUT)/acm_fakeworker $(OUT)/acm_runtime_test
+
+all: $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(OUT)/acm_plane_test $(PLANETEST) $(RUNTIME)
+
+# what builds and tests without FFmpeg: make runtime OUT=...
+runtime: $(OUT)/acm_plane_test $(RUNTIME)
 
 $(OUT)/acmedia-worker: $(WSRC) src/*.h
 	$(CC) $(WCFLAGS) -o $@ $(WSRC) $(WLIBS)
@@ -43,7 +50,16 @@ $(OUT)/acm_plane_test: tests/acm_plane_test.c $(BSRC) src/*.h
 $(OUT)/acm_planetest: tests/acm_planetest.c $(BSRC) src/*.h
 	$(CC) $(CFLAGS) $(DRMCF) -o $@ tests/acm_planetest.c $(BSRC) $(DRMLIB)
 
-clean:
-	rm -f $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(OUT)/acm_plane_test $(OUT)/acm_planetest
+$(OUT)/libacmedia.so: $(RSRC) src/*.h
+	$(CC) $(CFLAGS) -fPIC -shared -fvisibility=hidden -pthread -o $@ $(RSRC) -ldl
 
-.PHONY: all clean
+$(OUT)/acm_fakeworker: tests/acm_fakeworker.c src/acm_msg.c src/*.h
+	$(CC) $(CFLAGS) -o $@ tests/acm_fakeworker.c src/acm_msg.c
+
+$(OUT)/acm_runtime_test: tests/acm_runtime_test.c src/*.h
+	$(CC) $(CFLAGS) -pthread -o $@ tests/acm_runtime_test.c -ldl
+
+clean:
+	rm -f $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acm_test $(OUT)/acm_plane_test $(OUT)/acm_planetest $(RUNTIME)
+
+.PHONY: all clean runtime
