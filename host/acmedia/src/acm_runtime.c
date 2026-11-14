@@ -129,8 +129,9 @@ struct sess {
     int64_t base_pts;
     int based;
     int veof, aeof;
-    uint64_t veof_ns, audio_read_ns;
+    uint64_t veof_ns, video_again_ns, audio_read_ns;
     int64_t audio_until_ms;
+    int audio_drop;
 };
 
 struct probe {
@@ -433,8 +434,9 @@ static void seek_to(struct sess *s, int64_t ms, uint32_t flags) {
     pthread_mutex_lock(&s->mu);
     s->aqh = s->aqn = 0;
     s->veof = s->aeof = 0;
-    s->veof_ns = s->audio_read_ns = 0;
+    s->veof_ns = s->video_again_ns = s->audio_read_ns = 0;
     s->audio_until_ms = ms;
+    s->audio_drop = 0;
     if (!r) { s->pos_ms = ms; if (s->state == ACM_STATE_ENDED) s->state = ACM_STATE_PAUSED; }
     int dead = s->w.dead;
     pthread_mutex_unlock(&s->mu);
@@ -508,17 +510,20 @@ static int wait_until(struct sess *s, uint64_t t) {
  * only the copied byte count. */
 static int step_audio(struct sess *s) {
     pthread_mutex_lock(&s->mu);
-    /* Once video has ended, unread sound must not hold END forever. An
+    /* Once video has ended, or its decoder is applying cross-stream
+     * back-pressure, unread sound must not hold END/picture forever. An
      * active guest is allowed to play the whole tail; only an idle full
-     * queue is discarded so the worker can be drained to its own EOF. */
-    if (s->veof && s->aqn == RT_AUDIO_QUEUE) {
-        uint64_t last = s->audio_read_ns > s->veof_ns ? s->audio_read_ns : s->veof_ns;
-        if (now_ns() - last >= RT_AUDIO_IDLE_NS) {
+     * queue is discarded so the worker can be drained or video can move. */
+    if ((s->veof || s->video_again_ns) && s->aqn == RT_AUDIO_QUEUE) {
+        uint64_t edge = s->veof ? s->veof_ns : s->video_again_ns;
+        uint64_t last = s->audio_read_ns > edge ? s->audio_read_ns : edge;
+        if (s->audio_drop || now_ns() - last >= RT_AUDIO_IDLE_NS) {
             s->aqh = (s->aqh + 1) % RT_AUDIO_QUEUE;
             s->aqn--;
+            s->audio_drop = 1;
         }
     }
-    int ahead = s->op.video >= 0 && !s->veof && s->audio_until_ms > s->pos_ms + RT_AUDIO_AHEAD_MS;
+    int ahead = s->op.video >= 0 && !s->veof && !s->video_again_ns && s->audio_until_ms > s->pos_ms + RT_AUDIO_AHEAD_MS;
     int need = s->op.audio >= 0 && s->aqn < RT_AUDIO_QUEUE && !s->aeof && !ahead;
     pthread_mutex_unlock(&s->mu);
     if (!need) return 0;
@@ -579,9 +584,15 @@ static void step(struct sess *s) {
             s->nfds = 0;
             r = acm_err(t, buf, ACM_E_DECODER);
         }
-        if (r == ACM_E_AGAIN) { plane_events(s, 10); return; }       /* every slot is out: wait for one back */
+        if (r == ACM_E_AGAIN) {
+            pthread_mutex_lock(&s->mu);
+            if (!s->video_again_ns) s->video_again_ns = now_ns();
+            pthread_mutex_unlock(&s->mu);
+            plane_events(s, 10);
+            return;
+        }
         if (r == ACM_E_EOF) {
-            pthread_mutex_lock(&s->mu); s->veof = 1; s->veof_ns = now_ns(); pthread_mutex_unlock(&s->mu);
+            pthread_mutex_lock(&s->mu); s->veof = 1; s->video_again_ns = 0; s->veof_ns = now_ns(); pthread_mutex_unlock(&s->mu);
             finish_if_done(s);
             return;
         }
@@ -593,6 +604,7 @@ static void step(struct sess *s) {
         }
         memcpy(&s->nf, buf, sizeof s->nf);
         s->have = 1;
+        pthread_mutex_lock(&s->mu); s->video_again_ns = 0; pthread_mutex_unlock(&s->mu);
         if (s->nf.flags & ACM_FF_PATH) {
             pthread_mutex_lock(&s->mu); s->vpath = gpath(s->nf.path); pthread_mutex_unlock(&s->mu);
             post(s->handle, ACMG_EV_PATH, gpath(s->nf.path), 0);
@@ -882,6 +894,7 @@ static int32_t be_audio(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, ui
         s->aqh = (s->aqh + 1) % RT_AUDIO_QUEUE;
         s->aqn--;
         s->audio_read_ns = now_ns();
+        s->audio_drop = 0;
         pthread_cond_signal(&s->cv);
         r = (int32_t)bytes;
     }

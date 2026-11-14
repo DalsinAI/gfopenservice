@@ -9,7 +9,7 @@
  * session plays), CLOSE while playing, and no worker left behind.
  *
  *   acm_runtime_test LIBACMEDIA FAKEWORKER [--real FILE]
- *   acm_runtime_test LIBACMEDIA WORKER --real-flow FILE FRAMES SAMPLES
+ *   acm_runtime_test LIBACMEDIA WORKER --real-flow[-paced|-unread] FILE FRAMES SAMPLES
  * Team 6, 12 Nov 2026. MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
@@ -254,7 +254,8 @@ static int real_file(const char *libpath, const char *worker, const char *clip) 
 /* The review stress case through the public backend: consume audio as fast
  * as offered while video stays on its real-time clock. Read-ahead must be
  * back-pressured, not overflow the worker's crossed-video queue. */
-static int real_flow(const char *libpath, const char *worker, const char *clip, int want_frames, int want_samples) {
+static int real_flow(const char *libpath, const char *worker, const char *clip, int want_frames, int want_samples,
+                     int pace, int unread) {
     char name[512];
     real_mode = 1;
     snprintf(real_dir, sizeof real_dir, "%s", clip);
@@ -278,9 +279,12 @@ static int real_flow(const char *libpath, const char *worker, const char *clip, 
     int samples = 0, ended = 0, failed = 0;
     uint64_t deadline = ms_now() + (uint64_t)(want_frames > 0 ? want_frames * 1000 / 20 + 30000 : 60000);
     while (ms_now() < deadline && !ended && !failed) {
-        r = B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 0);
-        if (r > 0) samples += r / 4;
-        else if (r != ACM_E_AGAIN && r != ACM_E_EOF) failed = r;
+        r = unread ? ACM_E_AGAIN : B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 0);
+        if (r > 0) {
+            int got = r / 4;
+            samples += got;
+            if (pace) usleep((useconds_t)((uint64_t)got * 1000000 / 48000));
+        } else if (r != ACM_E_AGAIN && r != ACM_E_EOF) failed = r;
         pthread_mutex_lock(&emu);
         for (int i = event_start; i < nev; i++) if (evs[i].h == h) {
             if (evs[i].type == ACMG_EV_END) ended = 1;
@@ -290,26 +294,32 @@ static int real_flow(const char *libpath, const char *worker, const char *clip, 
         if (r == ACM_E_AGAIN) usleep(500);
     }
     /* END may be posted with the final PCM blocks still waiting for the guest. */
-    uint64_t drain_deadline = ms_now() + 5000;
-    for (;;) {
-        r = B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 0);
-        if (r > 0) { samples += r / 4; continue; }
-        if (r == ACM_E_AGAIN && ms_now() < drain_deadline) { usleep(500); continue; }
-        break;
+    if (!unread) {
+        uint64_t drain_deadline = ms_now() + 5000;
+        for (;;) {
+            r = B->audio(B->ctx, 1, pcm, sizeof pcm, ACMG_SND_S16, 0);
+            if (r > 0) { samples += r / 4; continue; }
+            if (r == ACM_E_AGAIN && ms_now() < drain_deadline) { usleep(500); continue; }
+            break;
+        }
     }
     int frames = count_ev(h, ACMG_EV_FRAME, event_start);
     B->close(B->ctx, 1);
-    printf("acm_runtime_real_flow: %d/%d frames, %d/%d samples, end=%d error=%d\n",
-           frames, want_frames, samples, want_samples, ended, failed);
+    printf("acm_runtime_real_flow%s%s: %d/%d frames, %d/%d samples, end=%d error=%d\n",
+           pace ? " paced" : "", unread ? " unread" : "", frames, want_frames, samples, want_samples, ended, failed);
     return !ended || failed || frames != want_frames || samples != want_samples;
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-flow FILE FRAMES SAMPLES]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
     signal(SIGPIPE, SIG_IGN);
     if (argc == 5 && !strcmp(argv[3], "--real")) return real_file(argv[1], argv[2], argv[4]);
     if (argc == 7 && !strcmp(argv[3], "--real-flow"))
-        return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]));
+        return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 0, 0);
+    if (argc == 7 && !strcmp(argv[3], "--real-flow-paced"))
+        return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 1, 0);
+    if (argc == 7 && !strcmp(argv[3], "--real-flow-unread"))
+        return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 0, 1);
     snprintf(dir, sizeof dir, "/tmp/acmrtXXXXXX");
     if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
     snprintf(vsock, sizeof vsock, "%s/video.sock", dir);
