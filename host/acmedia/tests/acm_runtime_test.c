@@ -411,6 +411,43 @@ static int real_feed_file(const char *libpath, const char *worker, const char *c
     return total != (size_t)size;
 }
 
+/* Known-size seekable FEED: NEED asks for the one bounded view, short guest
+ * writes fill it, and the worker starts only after the range is complete. */
+static int real_seek_feed_file(const char *libpath, const char *worker, const char *clip) {
+    FILE *f = fopen(clip, "rb");
+    if (!f || fseek(f, 0, SEEK_END) || ftell(f) <= 0 || ftell(f) > (256 << 10)) { if (f) fclose(f); return 1; }
+    long size = ftell(f); rewind(f);
+    uint8_t *data = malloc((size_t)size);
+    if (!data || fread(data, 1, (size_t)size, f) != (size_t)size) { free(data); fclose(f); return 1; }
+    fclose(f);
+    setenv("AC_ACMEDIA_WORKER", worker, 1); setenv("AC_ACMEDIA_HW", "0", 1);
+    unsetenv("AC_ACMEDIA_DENY"); unsetenv("AC_ACMEDIA_HWONLY");
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
+    acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
+    if (!entry || !(B = entry(&host))) { free(data); return 1; }
+    uint8_t d[12], vt[32] = { 0 }; be(vt, ACMG_OUT_GUEST);
+    feedd(d, (uint32_t)size, ACMG_SF_SEEKABLE);
+    uint32_t h = 0x15e; int from = nev_now(); struct ev e;
+    int32_t r = B->open(B->ctx, 1, h, d, sizeof d, ACMG_ST_VIDEO, vt, NULL, 0, ACMG_OF_EVENTS_FRAME);
+    if (r != ACM_PENDING || wait_ev(h, ACMG_EV_NEED, &from, 1000, &e) < 0 || e.a != 0 || e.b != (uint32_t)size) {
+        free(data); return 1;
+    }
+    size_t at = 0; unsigned writes = 0;
+    while (at < (size_t)size) {
+        uint32_t ask = (uint32_t)((size_t)size - at > 4096 ? 4096 : (size_t)size - at);
+        int32_t took = B->feed(B->ctx, 1, data + at, ask, 0);
+        if (took <= 0) { free(data); return 1; }
+        at += (size_t)took; writes++;
+    }
+    free(data);
+    if (wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0) return 1;
+    uint32_t a4[4] = { 0, 0, 0, 0 };
+    if (B->control(B->ctx, 1, ACMG_CTL_PLAY, a4) || wait_ev(h, ACMG_EV_FRAME, &from, 5000, &e) < 0) return 1;
+    B->close(B->ctx, 1);
+    printf("acm_runtime_real_seek_feed: PASS bytes=%ld writes=%u need=0/%ld video_event=1\n", size, writes, size);
+    return 0;
+}
+
 /* The review stress case through the public backend: consume audio as fast
  * as offered while video stays on its real-time clock. Read-ahead must be
  * back-pressured, not overflow the worker's crossed-video queue. */
@@ -471,11 +508,12 @@ static int real_flow(const char *libpath, const char *worker, const char *clip, 
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-cd FILE | --real-feed FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-cd FILE | --real-feed FILE | --real-seek-feed FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
     signal(SIGPIPE, SIG_IGN);
     if (argc == 5 && !strcmp(argv[3], "--real")) return real_file(argv[1], argv[2], argv[4]);
     if (argc == 5 && !strcmp(argv[3], "--real-cd")) return real_cd_file(argv[1], argv[2], argv[4]);
     if (argc == 5 && !strcmp(argv[3], "--real-feed")) return real_feed_file(argv[1], argv[2], argv[4]);
+    if (argc == 5 && !strcmp(argv[3], "--real-seek-feed")) return real_seek_feed_file(argv[1], argv[2], argv[4]);
     if (argc == 7 && !strcmp(argv[3], "--real-flow"))
         return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 0, 0);
     if (argc == 7 && !strcmp(argv[3], "--real-flow-paced"))
@@ -577,7 +615,7 @@ int main(int argc, char **argv) {
           "a FEED probe has no session to feed: ACM_E_NOTAVAIL");
     feedd(d, 0, ACMG_SF_SEEKABLE);
     CHECK(B->open(B->ctx, 1, 0x501, d, 12, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_NOTAVAIL,
-          "seekable FEED is not silently treated as a FIFO");
+          "an unknown-size seekable FEED is not silently treated as a FIFO");
     cdd(d, 0, 1, 1);
     CHECK(B->open(B->ctx, 1, 0x501, d, 16, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_BADARG,
           "CD rejects track zero");
@@ -594,6 +632,22 @@ int main(int argc, char **argv) {
     CHECK(B->open(B->ctx, 1, 0x4cd, d, 16, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_PENDING &&
           wait_ev(0x4cd, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
           "CD opens through its bounded LBA view");
+    B->close(B->ctx, 1);
+
+    static const uint8_t seekline[] = "FAKE 48 32 4 25\n";
+    feedd(d, sizeof seekline - 1, ACMG_SF_SEEKABLE);
+    from = nev_now();
+    CHECK(B->open(B->ctx, 1, 0x5ee, d, 12, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_PENDING &&
+          wait_ev(0x5ee, ACMG_EV_NEED, &from, 1000, &e) >= 0 && e.a == 0 && e.b == sizeof seekline - 1,
+          "known bounded seekable FEED posts NEED(0,size)");
+    CHECK(B->feed(B->ctx, 1, seekline, 5, 0) == 5 &&
+          wait_ev(0x5ee, ACMG_EV_OPENED, &from, 0, &e) < 0,
+          "seekable FEED does not expose a partial view to the worker");
+    CHECK(B->feed(B->ctx, 1, seekline + 5, sizeof seekline - 1 - 5, 0) == (int32_t)sizeof seekline - 1 - 5 &&
+          wait_ev(0x5ee, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
+          "the complete requested view starts the worker");
+    CHECK(B->feed(B->ctx, 1, seekline, 1, 0) == ACM_E_EOF,
+          "seekable FEED rejects bytes beyond the requested view");
     B->close(B->ctx, 1);
 
     fn = feedd(d, 0, 0);

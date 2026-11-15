@@ -66,8 +66,11 @@ and the event queue; the backend gets host pointers and posts events.
   reads nonblocking so an empty live queue is `ACM_E_AGAIN`, not a watchdog
   failure. A CD source is restricted to its descriptor's inclusive
   first/last 2048-byte LBA range; reads, size queries and seeks are relative
-  to that worker view and cannot reach bytes outside it. Seekable FEED/NEED
-  remains explicit `ACM_E_NOTAVAIL` until its read-at protocol lands.
+  to that worker view and cannot reach bytes outside it. A seekable FEED with
+  a known size up to 256 KiB posts `NEED(0,size)`, fills a fixed memfd view,
+  and starts the worker only after the complete request. Unknown, larger and
+  sparse/random seekable feeds remain explicit `ACM_E_NOTAVAIL` until the
+  full read-at protocol lands.
 - ACM_CONTROL queues PLAY, PAUSE, STOP, SEEK, RATE, SETRECT for the session's
   thread; EVENTS and VOLUME are kept. Frames are paced by their pts from the
   moment PLAY lands.
@@ -115,6 +118,12 @@ opens only the declared inclusive LBA view:
 
     build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
         build/$(uname -m)/acmedia-worker-system --real-cd "$PWD/tests/clips/h264-av.mp4"
+
+The first seekable receipt proves the bounded `NEED` prefill using short
+writes and a real Matroska demux:
+
+    build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
+        build/$(uname -m)/acmedia-worker-system --real-seek-feed "$PWD/tests/clips/h264-small.mkv"
 
 `acm_test avflow FILE` first counts each stream alone, then verifies the exact
 same frame/sample counts when video and audio alternately fill the bounded

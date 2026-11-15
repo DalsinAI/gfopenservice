@@ -37,7 +37,9 @@
  *     relative 2048-byte LBA view of that instance's image; and unseekable
  *     FEED through a bounded socket queue. ACM_FEED is a nonblocking
  *     producer: short writes are back-pressure and accepted EOF half-closes
- *     the queue. Seekable FEED/NEED remains deliberately NOTAVAIL.
+ *     the queue. A known seekable source no larger than the queue cap posts
+ *     one NEED and is exposed only after its fixed memfd view is complete;
+ *     larger/unknown/sparse read-at remains deliberately NOTAVAIL.
  *   - CONTROL: PLAY, PAUSE, STOP (paused at the start), SEEK, RATE (1/16 to
  *     16), VOLUME (kept), SETRECT, EVENTS; SELECT and TARGET are ACM_E_BADARG.
  *
@@ -61,6 +63,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "acm_broker.h"
 #include "acm_codecs.h"
@@ -81,6 +84,7 @@ uint32_t acm_tag_parse(const char *s);
 #define RT_ASK_MS 2000
 #define RT_FEED_OPEN_MS 120000         /* a producer may need several writes before format discovery */
 #define RT_FEED_QUEUE (256u << 10)     /* design's advised upper chunk; kernel may round this */
+#define RT_SEEK_FEED_MAX RT_FEED_QUEUE /* first bounded NEED slice: one fixed request, never host-OOM */
 #define RT_POOL_MAX (768ull << 20)     /* the worker uses the same total cap */
 #define RT_POOL_SLOTS_MAX 256u
 #define RT_DIM_MAX 16384u
@@ -112,6 +116,8 @@ struct sess {
     int fd;
     int feed_fd;
     int feed, feed_eof;
+    int feed_seekable, feed_ready;
+    uint32_t feed_at, feed_size;
     uint64_t source_base, source_size;
     uint32_t streams, vkind, akind, flags;
     struct acv_rect rect;
@@ -705,6 +711,13 @@ static void step(struct sess *s) {
 
 static void *sess_main(void *a) {
     struct sess *s = a;
+    if (s->feed_seekable) {
+        pthread_mutex_lock(&s->mu);
+        while (!s->closing && !s->feed_ready) pthread_cond_wait(&s->cv, &s->mu);
+        int closing = s->closing;
+        pthread_mutex_unlock(&s->mu);
+        if (closing) goto done;
+    }
     int r = sess_open(s);
     if (r) {
         set_state(s, ACM_STATE_ERROR, r);
@@ -738,6 +751,7 @@ static void *sess_main(void *a) {
         if (playing) step(s);
         else plane_events(s, 0);
     }
+done:
     if (s->plane) acm_plane_close(&s->pl, &s->w, 500);
     drop_next(s);
     drop_ready(s);
@@ -768,8 +782,9 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     uint32_t source_kind = rd(src);
     if (source_kind == ACMG_SRC_FEED) {
         if (srclen != 12 || (rd(src + 8) & ~ACMG_SF_SEEKABLE)) return ACM_E_BADARG;
-        /* A seekable feed needs the NEED/read-at protocol, not this FIFO. */
-        if (rd(src + 8) & ACMG_SF_SEEKABLE) return ACM_E_NOTAVAIL;
+        /* This first NEED slice pre-fills one known, bounded view.  Unknown
+         * or larger sources need the later sparse/random read-at protocol. */
+        if ((rd(src + 8) & ACMG_SF_SEEKABLE) && (!rd(src + 4) || rd(src + 4) > RT_SEEK_FEED_MAX)) return ACM_E_NOTAVAIL;
     } else if (source_kind == ACMG_SRC_CD) {
         if (srclen != 16 || !rd(src + 4) || rd(src + 4) > 99 || rd(src + 8) > rd(src + 12)) return ACM_E_BADARG;
     } else if (source_kind != ACMG_SRC_ACFS) return ACM_E_BADARG;
@@ -782,7 +797,11 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     struct sess *s = calloc(1, sizeof *s);
     if (!s) return ACM_E_LIMIT;
     s->rt = &R; s->slot = slot; s->handle = handle; s->streams = streams; s->vkind = vk; s->akind = ak; s->flags = flags;
-    s->fd = s->feed_fd = -1; s->feed = source_kind == ACMG_SRC_FEED;
+    s->fd = s->feed_fd = -1; s->w.sock = s->w.pool_fd = -1; s->feed = source_kind == ACMG_SRC_FEED;
+    if (s->feed && (rd(src + 8) & ACMG_SF_SEEKABLE)) {
+        s->feed_seekable = 1; s->feed_size = rd(src + 4);
+        s->source_size = s->feed_size;
+    }
     if (source_kind == ACMG_SRC_CD) {
         s->source_base = (uint64_t)rd(src + 8) * 2048u;
         s->source_size = ((uint64_t)rd(src + 12) - rd(src + 8) + 1u) * 2048u;
@@ -799,18 +818,30 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     if (s->feed) {
         int resolved = s->fd, sv[2];
         s->fd = -1;
-        if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv)) {
+        if (s->feed_seekable) {
+            struct stat st;
+            char p[64];
+            snprintf(p, sizeof p, "/proc/self/fd/%d", resolved);
+            if (fstat(resolved, &st) || !S_ISREG(st.st_mode) || st.st_size != 0 ||
+                ftruncate(resolved, s->feed_size) ||
+                fcntl(resolved, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) < 0 ||
+                (s->fd = open(p, O_RDONLY | O_CLOEXEC)) < 0) {
+                close(resolved); free(s); return ACM_E_LIMIT;
+            }
+            s->feed_fd = resolved;
+        } else if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv)) {
             close(resolved); free(s); return ACM_E_LIMIT;
+        } else {
+            close(resolved);                 /* #161's anonymous admission fd; the bounded queue is the worker source */
+            int fl = fcntl(sv[0], F_GETFL);
+            if (fl < 0 || fcntl(sv[0], F_SETFL, fl | O_NONBLOCK) < 0) {
+                close(sv[0]); close(sv[1]); free(s); return ACM_E_LIMIT;
+            }
+            int q = RT_FEED_QUEUE;
+            (void)setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &q, sizeof q);
+            s->feed_fd = sv[0];              /* nonblocking producer: ACM_FEED */
+            s->fd = sv[1];                   /* blocking consumer: worker OPEN */
         }
-        close(resolved);                     /* #161's anonymous admission fd; the bounded queue is the worker source */
-        int fl = fcntl(sv[0], F_GETFL);
-        if (fl < 0 || fcntl(sv[0], F_SETFL, fl | O_NONBLOCK) < 0) {
-            close(sv[0]); close(sv[1]); free(s); return ACM_E_LIMIT;
-        }
-        int q = RT_FEED_QUEUE;
-        (void)setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &q, sizeof q);
-        s->feed_fd = sv[0];                  /* nonblocking producer: ACM_FEED */
-        s->fd = sv[1];                       /* blocking consumer: worker OPEN */
     }
     pthread_mutex_init(&s->mu, NULL);
     pthread_cond_init(&s->cv, NULL);
@@ -828,6 +859,7 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
         close(s->fd); if (s->feed_fd >= 0) close(s->feed_fd); free(s);
         return ACM_E_LIMIT;
     }
+    if (s->feed_seekable) post(handle, ACMG_EV_NEED, 0, s->feed_size);
     return ACM_PENDING;
 }
 
@@ -1012,6 +1044,22 @@ static int32_t be_feed(void *ctx, uint32_t slot, const uint8_t *in, uint32_t len
     int32_t r;
     if (!s->feed) r = ACM_E_BADARG;
     else if (s->feed_eof) r = ACM_E_EOF;
+    else if (s->feed_seekable) {
+        uint32_t left = s->feed_size - s->feed_at;
+        uint32_t take = len < left ? len : left;
+        ssize_t n;
+        do n = take ? pwrite(s->feed_fd, in, take, (off_t)s->feed_at) : 0;
+        while (n < 0 && errno == EINTR);
+        if (n < 0) r = ACM_E_IO;
+        else {
+            s->feed_at += (uint32_t)n;
+            r = (int32_t)n;
+            if (s->feed_at == s->feed_size) {
+                s->feed_ready = s->feed_eof = 1;
+                pthread_cond_signal(&s->cv);
+            }
+        }
+    }
     else {
         ssize_t n = len ? send(s->feed_fd, in, len, MSG_DONTWAIT | MSG_NOSIGNAL) : 0;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) n = 0;
