@@ -212,7 +212,11 @@ static int open_demuxer(void)
     if (!fmt) return ACM_E_LIMIT;
     fmt->pb = avio;
     fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
-    fmt->probesize = 8 << 20;
+    /* A finite file can spend up to 8 MiB identifying odd containers. A
+     * live FEED must finish discovery without waiting for EOF; 64 KiB is the
+     * design's minimum advised producer chunk and enough for stream headers. */
+    fmt->probesize = src_feed ? 64 << 10 : 8 << 20;
+    if (src_feed) fmt->max_analyze_duration = 500000; /* 0.5 s of timestamps, not the stream's EOF */
     if (avformat_open_input(&fmt, NULL, NULL, NULL) < 0) { fmt = NULL; return ACM_E_FORMAT; }
     if (avformat_find_stream_info(fmt, NULL) < 0) return ACM_E_FORMAT;
     return 0;
@@ -659,6 +663,7 @@ static void do_open(const struct acm_open *o)
             reply_error(ACM_E_IO, 0, "feed nonblocking");
             return;
         }
+        fmt->flags |= AVFMT_FLAG_NONBLOCK;
     }
     acm_send(sock, ACM_A_OPENED, &op, sizeof op, NULL, 0, NULL, 0);
 }

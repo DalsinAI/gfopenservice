@@ -278,13 +278,15 @@ static int real_feed_file(const char *libpath, const char *worker, const char *c
     void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
     acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
     if (!entry || !(B = entry(&host))) { fprintf(stderr, "real-feed: libacmedia unavailable: %s\n", dlerror()); fclose(f); return 1; }
-    uint8_t d[12], vt[32] = { 0 }, at[32] = { 0 }, chunk[65536], info[4096];
+    uint8_t d[12], vt[32] = { 0 }, at[32] = { 0 }, chunk[4096], info[4096];
     be(vt, ACMG_OUT_GUEST); be(at, ACMG_OUT_GUEST);
     uint32_t h = 0x101, n = feedd(d, size > 0xffffffffL ? 0 : (uint32_t)size, 0);
     int from = nev_now(); struct ev e;
     int32_t r = B->open(B->ctx, 1, h, d, n, ACMG_ST_VIDEO | ACMG_ST_AUDIO, vt, at, 0, ACMG_OF_EVENTS_FRAME);
     if (r != ACM_PENDING) { fprintf(stderr, "real-feed: OPEN failed (%d)\n", r); fclose(f); return 1; }
     size_t total = 0; unsigned shorts = 0;
+    int opened_while_feeding = 0, playing = 0;
+    uint32_t a4[4] = { 0, 0, 0, 0 };
     for (;;) {
         size_t got = fread(chunk, 1, sizeof chunk, f);
         size_t atp = 0;
@@ -295,13 +297,26 @@ static int real_feed_file(const char *libpath, const char *worker, const char *c
             if ((size_t)took < got - atp) shorts++;
             atp += (size_t)took; total += (size_t)took;
         }
+        usleep(1000);                    /* a live producer, not a whole-file burst */
+        if (!opened_while_feeding && wait_ev(h, ACMG_EV_OPENED, &from, 0, &e) >= 0) {
+            opened_while_feeding = 1;
+            if (B->control(B->ctx, 1, ACMG_CTL_PLAY, a4)) { fprintf(stderr, "real-feed: early PLAY failed\n"); fclose(f); return 1; }
+            playing = 1;
+            /* Deliberately leave the live queue empty once. NEXT must answer
+             * AGAIN and survive until the next producer write. */
+            usleep(20000);
+            if (B->info(B->ctx, 1, info, sizeof info) < 0 || rd(info + 4 * ACM_IH_STATE) == ACM_STATE_ERROR) {
+                fprintf(stderr, "real-feed: empty live queue became an error\n"); fclose(f); return 1;
+            }
+        }
         if (got < sizeof chunk) {
             if (ferror(f)) { perror("real-feed fread"); fclose(f); return 1; }
             break;
         }
     }
     fclose(f);
-    if (B->feed(B->ctx, 1, NULL, 0, ACMG_FF_EOF) != 0 || wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0) {
+    if (B->feed(B->ctx, 1, NULL, 0, ACMG_FF_EOF) != 0 ||
+        (!opened_while_feeding && wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0)) {
         fprintf(stderr, "real-feed: EOF/OPENED failed\n"); return 1;
     }
     r = B->info(B->ctx, 1, info, sizeof info);
@@ -309,8 +324,7 @@ static int real_feed_file(const char *libpath, const char *worker, const char *c
     if (r < 0 || rd(info + 4 * ACM_IH_VIDEO) == 0xffffffffu) {
         fprintf(stderr, "real-feed: INFO has no video stream (%d)\n", r); return 1;
     }
-    uint32_t a4[4] = { 0, 0, 0, 0 };
-    if (B->control(B->ctx, 1, ACMG_CTL_PLAY, a4) || wait_ev(h, ACMG_EV_FRAME, &from, 5000, &e) < 0) {
+    if ((!playing && B->control(B->ctx, 1, ACMG_CTL_PLAY, a4)) || wait_ev(h, ACMG_EV_FRAME, &from, 5000, &e) < 0) {
         B->info(B->ctx, 1, info, sizeof info);
         fprintf(stderr, "real-feed: no decoded video (state=%u err=%d ERROR=%d END=%d)\n",
                 rd(info + 4 * ACM_IH_STATE), (int32_t)rd(info + 4 * ACM_IH_ERROR),
@@ -318,8 +332,8 @@ static int real_feed_file(const char *libpath, const char *worker, const char *c
         return 1;
     }
     B->close(B->ctx, 1);
-    printf("acm_runtime_real_feed: PASS bytes=%zu short_writes=%u video_event=1 audio=%s\n",
-           total, shorts, ai == 0xffffffffu ? "none" : "yes");
+    printf("acm_runtime_real_feed: PASS bytes=%zu short_writes=%u live_open=%d video_event=1 audio=%s\n",
+           total, shorts, opened_while_feeding, ai == 0xffffffffu ? "none" : "yes");
     return total != (size_t)size;
 }
 
