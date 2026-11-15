@@ -273,7 +273,11 @@ static void voice_reset(struct sess *s, int64_t ms) {
     uint64_t read = acmv_u64(s->voice, ACMV_O_READ);
     acmv_put_u64(s->voice, ACMV_O_WRITE, read);
     uint64_t played = acmv_u64(s->voice, ACMV_O_PLAYED);
-    int64_t origin = (ms > 0 ? ms : 0) * 1000000ll - (int64_t)(played * 1000000000ull / ACMV_RATE);
+    /* The first new sample is written at READ, not at the latency-corrected
+     * PLAYED cursor.  Anchor that sample to the seek target; when the mixer
+     * later advances PLAYED to this READ position, sound and picture both
+     * report the requested media time. */
+    int64_t origin = (ms > 0 ? ms : 0) * 1000000ll - (int64_t)(read * 1000000000ull / ACMV_RATE);
     acmv_put_u64(s->voice, ACMV_O_ORIGIN_NS, (uint64_t)origin);
     s->voice_origin_set = 1;
     acmv_put_u32(s->voice, ACMV_O_GENERATION, ++s->voice_generation);

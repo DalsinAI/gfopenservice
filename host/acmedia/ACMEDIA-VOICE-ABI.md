@@ -37,7 +37,8 @@ physical-latency claim.
 PLAY clears `PAUSED`; PAUSE sets it. `GAIN_Q16` is CONTROL VOLUME. Non-1x RATE
 is refused because this v1 voice and its mixer clock are fixed at 44.1 kHz.
 SEEK makes `WRITE == READ`, writes `ORIGIN_NS` as the seek media time minus
-the cumulative `PLAYED` time, increments `GENERATION`, clears EOF, and
+the cumulative `READ` time (the first new sample's ring position), increments
+`GENERATION`, clears EOF, and
 resynchronises if READ advances across the reset. The mixer responds to a
 generation change by discarding its private FIFO.
 

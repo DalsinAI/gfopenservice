@@ -753,9 +753,10 @@ int main(int argc, char **argv) {
           "short sound does not freeze the remaining picture; END arrives");
     munmap(vm, (size_t)vst.st_size); B->close(B->ctx, 2);
 
-    /* PLAYED is cumulative across generations.  Seek therefore subtracts
-     * its current value from ORIGIN; also force READ one step ahead of WRITE
-     * to cover the real generation/cursor race. */
+    /* READ and PLAYED are cumulative across generations, with PLAYED behind
+     * READ by the mixer's latency.  Seek anchors the first new sample at READ
+     * to its requested media time; also force READ one step ahead of WRITE to
+     * cover the real generation/cursor race. */
     from = nev_now(); ah = 0x602;
     r = B->open(B->ctx, 2, ah, d, srcd(d, "av-seek.fake"), ACMG_ST_VIDEO | ACMG_ST_AUDIO,
                 gtarget, ahi, 59915, ACMG_OF_EVENTS_FRAME);
@@ -765,20 +766,22 @@ int main(int argc, char **argv) {
     vfd = open(vp, O_RDWR | O_CLOEXEC); fstat(vfd, &vst);
     vm = mmap(NULL, (size_t)vst.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, vfd, 0); close(vfd);
     a4[0] = 0; B->control(B->ctx, 2, ACMG_CTL_PLAY, a4);
+    const uint64_t seek_latency = 2646; /* #160: nominal 60 ms at 44.1 kHz */
     int64_t before_seek_pts = -1;
     int seek_frames = nev_now();
     uint64_t seek_deadline = ms_now() + 4000;
     while (before_seek_pts < 600 && ms_now() < seek_deadline) {
         voice_write = acmv_u64(vm, ACMV_O_WRITE);
         acmv_put_u64(vm, ACMV_O_READ, voice_write);
-        acmv_put_u64(vm, ACMV_O_PLAYED, voice_write);
+        acmv_put_u64(vm, ACMV_O_PLAYED,
+                     voice_write > seek_latency ? voice_write - seek_latency : 0);
         if (wait_ev(ah, ACMG_EV_FRAME, &seek_frames, 50, &e) >= 0) before_seek_pts = e.a;
     }
-    uint64_t played_before_seek = acmv_u64(vm, ACMV_O_PLAYED);
+    uint64_t read_before_seek = acmv_u64(vm, ACMV_O_READ);
     vg = acmv_u32(vm, ACMV_O_GENERATION);
     a4[0] = 200; a4[1] = ACMG_SEEK_EXACT;
     CHECK(before_seek_pts >= 600 && B->control(B->ctx, 2, ACMG_CTL_SEEK, a4) == 0,
-          "seek-clock accumulates PLAYED, then queues SEEK 200 ms");
+          "seek-clock accumulates READ with non-zero mixer latency, then queues SEEK 200 ms");
     seek_deadline = ms_now() + 2000;
     while (acmv_u32(vm, ACMV_O_GENERATION) == vg && ms_now() < seek_deadline) usleep(1000);
     uint64_t raced_write = acmv_u64(vm, ACMV_O_WRITE);
@@ -791,13 +794,14 @@ int main(int argc, char **argv) {
         uint64_t voice_read = acmv_u64(vm, ACMV_O_READ);
         if (voice_write >= voice_read) {
             acmv_put_u64(vm, ACMV_O_READ, voice_write);
-            acmv_put_u64(vm, ACMV_O_PLAYED, voice_write);
+            acmv_put_u64(vm, ACMV_O_PLAYED,
+                         voice_write > seek_latency ? voice_write - seek_latency : 0);
         }
         if (wait_ev(ah, ACMG_EV_FRAME, &after_seek, 50, &e) >= 0) after_seek_pts = e.a;
     }
-    CHECK(played_before_seek > 22050 && after_seek_pts >= 160 && after_seek_pts <= 360 &&
+    CHECK(read_before_seek > 22050 && after_seek_pts >= 160 && after_seek_pts <= 240 &&
           count_ev(ah, ACMG_EV_ERROR, after_seek) == 0,
-          "SEEK uses a relative cumulative clock and survives READ/WRITE race (PTS %lld)",
+          "SEEK keeps latency-corrected audio/picture aligned and survives READ/WRITE race (PTS %lld)",
           (long long)after_seek_pts);
     munmap(vm, (size_t)vst.st_size); B->close(B->ctx, 2);
 

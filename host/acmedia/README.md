@@ -232,7 +232,8 @@ check, for example:
   end, the end twice, seek, the same frames again;
 - audio-first demux preserves every video packet, and the runtime delivers a
   longer audio tail after video EOF while unread audio still reaches END;
-- direct ACAHI tests cover seek after a cumulative PLAYED clock, audio EOF
+- direct ACAHI tests cover seek after cumulative READ with non-zero mixer
+  latency, audio EOF
   before picture EOF, no mixer reader, hostile mapped capacity, stale-file
   takeover, the READ/WRITE seek race and explicit non-1x RATE refusal;
 - the policy: a deny never opens a decoder;
