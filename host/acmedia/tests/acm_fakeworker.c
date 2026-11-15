@@ -30,7 +30,7 @@
 #include "../src/acm_msg.h"
 #include "../src/acm_codecs.h"
 
-static int sock = 3, srcfd = -1;
+static int sock = 3, srcfd = -1, feed_source;
 static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4, has_audio, audio_samples, force_soft;
 static uint8_t *pool; static uint32_t slot_size; static int given[64];
 static uint32_t k, ak;                               /* the next video/audio data */
@@ -45,7 +45,15 @@ static int parse(void) {
     if (parsed) return parsed > 0;
     char line[256] = { 0 }, t[8] = "H264";
     parsed = -1;
-    if (srcfd < 0 || pread(srcfd, line, sizeof line - 1, 0) <= 0) return 0;
+    if (srcfd < 0) return 0;
+    if (feed_source) {
+        size_t at = 0;
+        while (at + 1 < sizeof line && !memchr(line, '\n', at)) {
+            ssize_t n = read(srcfd, line + at, sizeof line - 1 - at);
+            if (n <= 0) return 0;
+            at += (size_t)n;
+        }
+    } else if (pread(srcfd, line, sizeof line - 1, 0) <= 0) return 0;
     if (sscanf(line, "FAKE %u %u %u %u %7s", &W, &H, &N, &fps, t) < 4 || !W || !H || W > 4096 || H > 4096 || !fps) return 0;
     if (strncmp(t, "crash", 5) && strncmp(t, "slots", 5) && strncmp(t, "hang", 4)) {
         char b[4] = { ' ', ' ', ' ', ' ' }; memcpy(b, t, strlen(t) < 4 ? strlen(t) : 4); tag = ACM_TAG(b[0], b[1], b[2], b[3]);
@@ -137,7 +145,13 @@ int main(int argc, char **argv) {
         if (r <= 0) return 0;
         switch (t) {
         case ACM_Q_HELLO: { struct acm_ready rd = { ACM_PROTO_VERSION, ACM_SB_SECCOMP | ACM_SB_NNP, 0, 0 }; ok(&rd, sizeof rd); break; }
-        case ACM_Q_SOURCE: if (nf == 1) { srcfd = fds[0]; ok(NULL, 0); } else err(ACM_E_BADARG, "no fd"); break;
+        case ACM_Q_SOURCE:
+            if (nf == 1 && len == sizeof(struct acm_source)) {
+                srcfd = fds[0];
+                feed_source = !!(((const struct acm_source *)(const void *)rx)->flags & ACM_SOURCE_FEED);
+                ok(NULL, 0);
+            } else err(ACM_E_BADARG, "source");
+            break;
         case ACM_Q_PROBE: if (parse()) acm_send(sock, ACM_A_INFO, &info, sizeof info, NULL, 0, NULL, 0); else err(ACM_E_FORMAT, "not a fake"); break;
         case ACM_Q_OPEN: {
             if (!parse()) { err(ACM_E_FORMAT, "not a fake"); break; }

@@ -69,6 +69,7 @@ static uint32_t hw_paths;
 /* the source */
 static int src_fd = -1;
 static int64_t src_size = -1;
+static int src_feed;
 static AVIOContext *avio;
 static AVFormatContext *fmt;
 
@@ -127,7 +128,7 @@ static int src_read(void *o, uint8_t *buf, int n)
     (void)o;
     ssize_t r;
     do r = read(src_fd, buf, (size_t)n); while (r < 0 && errno == EINTR);
-    if (r < 0) return AVERROR(EIO);
+    if (r < 0) return errno == EAGAIN || errno == EWOULDBLOCK ? AVERROR(EAGAIN) : AVERROR(EIO);
     return r == 0 ? AVERROR_EOF : (int)r;
 }
 static int64_t src_seek(void *o, int64_t off, int whence)
@@ -461,18 +462,21 @@ static int feed(struct dec *want)
     }
     AVPacket *pkt = av_packet_alloc();
     if (!pkt) return ACM_E_LIMIT;
-    int r = 0;
+    int r = 0, invalid = 0;
     for (;;) {
         if ((want == &V && apqn == AUDIO_PACKET_QUEUE) || (want == &A && vqn == VIDEO_PACKET_QUEUE)) {
             r = ACM_E_AGAIN;
             break;
         }
         int e = av_read_frame(fmt, pkt);
+        if (e == AVERROR(EAGAIN)) { r = ACM_E_AGAIN; break; }
         if (e == AVERROR_EOF || (e < 0 && avio_feof(fmt->pb))) {
             if (!want->drained) { avcodec_send_packet(want->c, NULL); want->drained = 1; }
             break;
         }
+        if (e == AVERROR_INVALIDDATA && invalid++ < 32) continue;
         if (e < 0) { r = ACM_E_IO; break; }
+        invalid = 0;
         struct dec *to = pkt->stream_index == V.idx && V.c ? &V : pkt->stream_index == A.idx && A.c ? &A : NULL;
         if (to) {
             if (to != want) {
@@ -644,6 +648,17 @@ static void do_open(const struct acm_open *o)
         op.sample_rate = a_rate;
         op.channels = a_ch;
         if ((uint32_t)A.idx < op.info.nstreams) op.info.s[A.idx].channels = a_ch;
+    }
+    /* OPEN may block while a streamed source supplies enough bytes for
+     * probing.  Once it is ready, an empty queue is ordinary back-pressure,
+     * not a reason to hold NEXT until the broker watchdog kills us. */
+    if (src_feed) {
+        int fl = fcntl(src_fd, F_GETFL);
+        if (fl < 0 || fcntl(src_fd, F_SETFL, fl | O_NONBLOCK) < 0) {
+            close_dec(&V); close_dec(&A);
+            reply_error(ACM_E_IO, 0, "feed nonblocking");
+            return;
+        }
     }
     acm_send(sock, ACM_A_OPENED, &op, sizeof op, NULL, 0, NULL, 0);
 }
@@ -969,11 +984,16 @@ int main(int argc, char **argv)
         case ACM_Q_SOURCE: {
             NEED(struct acm_source);
             if (fd < 0 || src_fd >= 0) { if (fd >= 0) close(fd); reply_error(ACM_E_BADARG, 0, "source"); break; }
+            const struct acm_source *source = (const void *)rx;
             int fl = fcntl(fd, F_GETFL);
-            if (fl < 0 || (fl & O_ACCMODE) != O_RDONLY) { close(fd); reply_error(ACM_E_BADARG, 0, "source must be read only"); break; }
+            if (fl < 0 || (source->flags & ~ACM_SOURCE_FEED) ||
+                (!(source->flags & ACM_SOURCE_FEED) && (fl & O_ACCMODE) != O_RDONLY)) {
+                close(fd); reply_error(ACM_E_BADARG, 0, "source access"); break;
+            }
             src_fd = fd;
+            src_feed = !!(source->flags & ACM_SOURCE_FEED);
             struct stat st;
-            src_size = (!fstat(fd, &st) && S_ISREG(st.st_mode)) ? (int64_t)st.st_size : -1;
+            src_size = !src_feed && !fstat(fd, &st) && S_ISREG(st.st_mode) ? (int64_t)st.st_size : -1;
             reply_ok(NULL, 0);
             break;
         }
