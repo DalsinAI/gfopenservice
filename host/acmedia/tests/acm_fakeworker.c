@@ -31,6 +31,7 @@
 #include "../src/acm_codecs.h"
 
 static int sock = 3, srcfd = -1, feed_source;
+static uint64_t source_base;
 static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4, has_audio, audio_samples, force_soft;
 static uint8_t *pool; static uint32_t slot_size; static int given[64];
 static uint32_t k, ak;                               /* the next video/audio data */
@@ -53,7 +54,7 @@ static int parse(void) {
             if (n <= 0) return 0;
             at += (size_t)n;
         }
-    } else if (pread(srcfd, line, sizeof line - 1, 0) <= 0) return 0;
+    } else if (pread(srcfd, line, sizeof line - 1, (off_t)source_base) <= 0) return 0;
     if (sscanf(line, "FAKE %u %u %u %u %7s", &W, &H, &N, &fps, t) < 4 || !W || !H || W > 4096 || H > 4096 || !fps) return 0;
     if (strncmp(t, "crash", 5) && strncmp(t, "slots", 5) && strncmp(t, "hang", 4)) {
         char b[4] = { ' ', ' ', ' ', ' ' }; memcpy(b, t, strlen(t) < 4 ? strlen(t) : 4); tag = ACM_TAG(b[0], b[1], b[2], b[3]);
@@ -148,7 +149,9 @@ int main(int argc, char **argv) {
         case ACM_Q_SOURCE:
             if (nf == 1 && len == sizeof(struct acm_source)) {
                 srcfd = fds[0];
-                feed_source = !!(((const struct acm_source *)(const void *)rx)->flags & ACM_SOURCE_FEED);
+                const struct acm_source *source = (const void *)rx;
+                feed_source = !!(source->flags & ACM_SOURCE_FEED);
+                source_base = source->base;
                 ok(NULL, 0);
             } else err(ACM_E_BADARG, "source");
             break;

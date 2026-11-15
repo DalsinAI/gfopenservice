@@ -74,7 +74,7 @@ static int count_ev(uint32_t h, uint32_t type, int from) {
 }
 static int nev_now(void) { pthread_mutex_lock(&emu); int n = nev; pthread_mutex_unlock(&emu); return n; }
 
-static char dir[64], real_dir[4096];
+static char dir[64], real_dir[4096], cd_path[4096];
 static int real_mode;
 static int sources;
 /* ACFS is a file in dir. FEED matches gfosmotherboards #161's admission
@@ -84,6 +84,14 @@ static int32_t host_source(const uint8_t *src, uint32_t n, int *fd) {
     *fd = -1;
     if (n == 12 && rd(src) == ACMG_SRC_FEED) {
         *fd = memfd_create("acmedia-feed-test", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+        sources++;
+        return *fd < 0 ? ACM_E_IO : 0;
+    }
+    if (n == 16 && rd(src) == ACMG_SRC_CD) {
+        char p[4096];
+        if (cd_path[0]) snprintf(p, sizeof p, "%s", cd_path);
+        else snprintf(p, sizeof p, "%s/cd.fake", dir);
+        *fd = open(p, O_RDONLY | O_CLOEXEC);
         sources++;
         return *fd < 0 ? ACM_E_IO : 0;
     }
@@ -108,9 +116,21 @@ static uint32_t srcd(uint8_t *d, const char *name) {
 static uint32_t feedd(uint8_t *d, uint32_t hint, uint32_t flags) {
     be(d, ACMG_SRC_FEED); be(d + 4, hint); be(d + 8, flags); return 12;
 }
+static uint32_t cdd(uint8_t *d, uint32_t track, uint32_t first, uint32_t last) {
+    be(d, ACMG_SRC_CD); be(d + 4, track); be(d + 8, first); be(d + 12, last); return 16;
+}
 static void file(const char *name, const char *text) {
     char p[256]; snprintf(p, sizeof p, "%s/%s", dir, name);
     FILE *f = fopen(p, "w"); fputs(text, f); fclose(f);
+}
+static void cd_file(const char *line) {
+    char p[256]; snprintf(p, sizeof p, "%s/cd.fake", dir);
+    FILE *f = fopen(p, "wb");
+    uint8_t zero[2048] = { 0 };
+    fwrite(zero, 1, sizeof zero, f);
+    fwrite(line, 1, strlen(line), f);
+    fwrite(zero, 1, sizeof zero - strlen(line), f);
+    fclose(f);
 }
 
 /* ---- a stand-in acscreen: each frame shown at once, the one before DONE; STATE off on demand ---- */
@@ -262,6 +282,60 @@ static int real_file(const char *libpath, const char *worker, const char *clip) 
     return 0;
 }
 
+/* A real demux through an inclusive CD LBA view.  The image has one sector
+ * of junk before the clip and another after the selected view: OPEN proves
+ * that neither the demuxer nor its seeks escape that view. */
+static int real_cd_file(const char *libpath, const char *worker, const char *clip) {
+    FILE *in = fopen(clip, "rb");
+    if (!in) { perror(clip); return 1; }
+    char tmp[] = "/tmp/acmedia-cd-XXXXXX";
+    int fd = mkstemp(tmp);
+    if (fd < 0) { fclose(in); perror("mkstemp"); return 1; }
+    FILE *out = fdopen(fd, "wb");
+    uint8_t sector[2048]; memset(sector, 0xa5, sizeof sector);
+    if (!out || fwrite(sector, 1, sizeof sector, out) != sizeof sector) { fclose(in); if (out) fclose(out); else close(fd); unlink(tmp); return 1; }
+    uint64_t bytes = 0; size_t got;
+    while ((got = fread(sector, 1, sizeof sector, in)) != 0) {
+        if (fwrite(sector, 1, got, out) != got) { fclose(in); fclose(out); unlink(tmp); return 1; }
+        bytes += got;
+    }
+    fclose(in);
+    if (!bytes) { fclose(out); unlink(tmp); return 1; }
+    uint32_t sectors = (uint32_t)((bytes + 2047u) / 2048u);
+    size_t pad = (size_t)((uint64_t)sectors * 2048u - bytes);
+    memset(sector, 0, sizeof sector);
+    if ((pad && fwrite(sector, 1, pad, out) != pad) || fwrite(sector, 1, sizeof sector, out) != sizeof sector || fclose(out)) {
+        unlink(tmp); return 1;
+    }
+    snprintf(cd_path, sizeof cd_path, "%s", tmp);
+    setenv("AC_ACMEDIA_WORKER", worker, 1);
+    setenv("AC_ACMEDIA_HW", "0", 1);
+    unsetenv("AC_ACMEDIA_DENY"); unsetenv("AC_ACMEDIA_HWONLY");
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
+    acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
+    if (!entry || !(B = entry(&host))) { unlink(tmp); return 1; }
+    uint8_t d[16], vt[32] = { 0 }, info[4096];
+    be(vt, ACMG_OUT_GUEST); cdd(d, 1, 1, sectors);
+    uint32_t h = 0x1cd; int from = nev_now(); struct ev e;
+    int32_t r = B->open(B->ctx, 1, h, d, sizeof d, ACMG_ST_VIDEO, vt, NULL, 0, ACMG_OF_EVENTS_FRAME);
+    if (r != ACM_PENDING || wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0 || B->info(B->ctx, 1, info, sizeof info) < 0) {
+        fprintf(stderr, "real-cd: OPEN failed (%d)\n", r); unlink(tmp); return 1;
+    }
+    uint32_t wh = rd(info + 4 * ACM_IH_SIZE), w = wh >> 16, hgt = wh & 0xffff;
+    uint32_t a4[4] = { 0, 0, 0, 0 };
+    if (!w || !hgt || B->control(B->ctx, 1, ACMG_CTL_PLAY, a4) || wait_ev(h, ACMG_EV_FRAME, &from, 5000, &e) < 0) {
+        fprintf(stderr, "real-cd: no video event\n"); B->close(B->ctx, 1); unlink(tmp); return 1;
+    }
+    size_t cap = (size_t)w * hgt * 2u;
+    uint8_t *frame = malloc(cap);
+    int32_t pts = frame ? B->frame(B->ctx, 1, frame, (uint32_t)cap, w, ACMG_PIX_YUV420, w, hgt) : ACM_E_LIMIT;
+    free(frame); B->close(B->ctx, 1); unlink(tmp); cd_path[0] = 0;
+    if (pts < 0) { fprintf(stderr, "real-cd: frame failed (%d)\n", pts); return 1; }
+    printf("acm_runtime_real_cd: PASS lba=1-%u bytes=%llu video=%ux%u pts=%d\n",
+           sectors, (unsigned long long)bytes, w, hgt, pts);
+    return 0;
+}
+
 /* The same checked-in A/V clip, but with no source path or file fd in the
  * worker.  The caller feeds 64 KiB chunks through the public backend, obeys
  * every short write, sends EOF, then proves the real demuxer/decoder opened. */
@@ -397,9 +471,10 @@ static int real_flow(const char *libpath, const char *worker, const char *clip, 
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-feed FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-cd FILE | --real-feed FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
     signal(SIGPIPE, SIG_IGN);
     if (argc == 5 && !strcmp(argv[3], "--real")) return real_file(argv[1], argv[2], argv[4]);
+    if (argc == 5 && !strcmp(argv[3], "--real-cd")) return real_cd_file(argv[1], argv[2], argv[4]);
     if (argc == 5 && !strcmp(argv[3], "--real-feed")) return real_feed_file(argv[1], argv[2], argv[4]);
     if (argc == 7 && !strcmp(argv[3], "--real-flow"))
         return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 0, 0);
@@ -472,6 +547,7 @@ int main(int argc, char **argv) {
     file("bad-offset.fake", "FAKE 64 48 2 25 bad=offset\n");
     file("bad-height.fake", "FAKE 64 48 2 25 bad=height\n");
     file("bad-pool.fake", "FAKE 64 48 2 25 bad=pool\n");
+    cd_file("FAKE 40 24 3 25\n");
     uint8_t d[256], out[4096];
     int from = 0;
     struct ev e;
@@ -502,9 +578,23 @@ int main(int argc, char **argv) {
     feedd(d, 0, ACMG_SF_SEEKABLE);
     CHECK(B->open(B->ctx, 1, 0x501, d, 12, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_NOTAVAIL,
           "seekable FEED is not silently treated as a FIFO");
-    be(d, ACMG_SRC_CD); be(d + 4, 1); be(d + 8, 0); be(d + 12, 1);
-    CHECK(B->open(B->ctx, 1, 0x501, d, 16, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_NOTAVAIL,
-          "CD is not handed to a worker without its bounded track/LBA view");
+    cdd(d, 0, 1, 1);
+    CHECK(B->open(B->ctx, 1, 0x501, d, 16, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_BADARG,
+          "CD rejects track zero");
+    cdd(d, 1, 2, 1);
+    CHECK(B->open(B->ctx, 1, 0x501, d, 16, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_BADARG,
+          "CD rejects a reversed LBA view");
+    cdd(d, 1, 1, 1);
+    from = nev_now();
+    tk = B->probe(B->ctx, d, 16, out, sizeof out);
+    CHECK(tk > 0 && wait_ev(0, ACMG_EV_PROBED, &from, 5000, &e) >= 0 &&
+          B->result(B->ctx, (uint32_t)tk, out, sizeof out) > 0 && rd(out + 4 * ACM_IH_SIZE) == 0,
+          "CD probe reads only the selected LBA view");
+    from = nev_now();
+    CHECK(B->open(B->ctx, 1, 0x4cd, d, 16, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_PENDING &&
+          wait_ev(0x4cd, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
+          "CD opens through its bounded LBA view");
+    B->close(B->ctx, 1);
 
     fn = feedd(d, 0, 0);
     from = nev_now();

@@ -392,6 +392,12 @@ static int cmd_conformance(const char *dir)
           && c == ACM_E_BADARG, "a writable source refused: %d", c);
     CHECK(ask_simple(&w, ACM_Q_SOURCE, &(struct acm_source){ 0, 0, 0 }, sizeof(struct acm_source), NULL, 0, &c) == ACM_A_ERROR
           && c == ACM_E_BADARG, "SOURCE without an fd: %d", c);
+    struct acm_source badview = { .base = UINT64_MAX, .size = 1 };
+    CHECK(ask_simple(&w, ACM_Q_SOURCE, &badview, sizeof badview, &rw, 1, &c) == ACM_A_ERROR && c == ACM_E_BADARG,
+          "a source view outside the file is refused: %d", c);
+    badview = (struct acm_source){ .base = 1, .size = 1, .flags = ACM_SOURCE_FEED };
+    CHECK(ask_simple(&w, ACM_Q_SOURCE, &badview, sizeof badview, &rw, 1, &c) == ACM_A_ERROR && c == ACM_E_BADARG,
+          "a FEED cannot smuggle a regular-file view: %d", c);
     /* a program is not media */
     CHECK(ask_simple(&w, ACM_Q_SOURCE, &(struct acm_source){ 0, 0, 0 }, sizeof(struct acm_source), &rw, 1, &c) == ACM_A_OK, "SOURCE: %d", c);
     CHECK(ask_simple(&w, ACM_Q_PROBE, NULL, 0, NULL, 0, &c) == ACM_A_ERROR && c == ACM_E_FORMAT, "probe of an ELF: %d", c);

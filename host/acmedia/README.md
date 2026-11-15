@@ -64,8 +64,10 @@ and the event queue; the backend gets host pointers and posts events.
   queue is full, and half-closes it only when a complete EOF write was
   accepted. The worker may wait for format bytes during OPEN; after OPEN it
   reads nonblocking so an empty live queue is `ACM_E_AGAIN`, not a watchdog
-  failure. Seekable FEED/NEED and CD track/LBA views remain explicit
-  `ACM_E_NOTAVAIL` until their read-at/view protocol lands.
+  failure. A CD source is restricted to its descriptor's inclusive
+  first/last 2048-byte LBA range; reads, size queries and seeks are relative
+  to that worker view and cannot reach bytes outside it. Seekable FEED/NEED
+  remains explicit `ACM_E_NOTAVAIL` until its read-at protocol lands.
 - ACM_CONTROL queues PLAY, PAUSE, STOP, SEEK, RATE, SETRECT for the session's
   thread; EVENTS and VOLUME are kept. Frames are paced by their pts from the
   moment PLAY lands.
@@ -107,6 +109,12 @@ chunks through `ACM_FEED`, sends EOF, and proves a decoded frame event:
 
     build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
         build/$(uname -m)/acmedia-worker-system --real-feed "$PWD/tests/clips/h264-small.mkv"
+
+The CD receipt wraps the same real clip with junk sectors on both sides and
+opens only the declared inclusive LBA view:
+
+    build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
+        build/$(uname -m)/acmedia-worker-system --real-cd "$PWD/tests/clips/h264-av.mp4"
 
 `acm_test avflow FILE` first counts each stream alone, then verifies the exact
 same frame/sample counts when video and audio alternately fill the bounded

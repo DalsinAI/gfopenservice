@@ -17,7 +17,7 @@
 
 #include <stdint.h>
 
-#define ACM_PROTO_VERSION 1
+#define ACM_PROTO_VERSION 2
 #define ACM_MSG_MAX 65536
 #define ACM_MAX_STREAMS 16
 #define ACM_MAX_TAGS 96
@@ -94,7 +94,9 @@ struct acm_ready {
  * OPEN, so an empty live feed answers NEXT with AGAIN rather than tripping
  * the watchdog. */
 #define ACM_SOURCE_FEED 1u
-struct acm_source { uint64_t size; uint32_t flags, pad; };
+/* base/size select a bounded byte view of a regular source.  A zero size
+ * means the complete file (base must then be zero).  FEED has neither. */
+struct acm_source { uint64_t base, size; uint32_t flags, pad; };
 
 /* Decode paths, per stream (ACM_INFO's "path in use") */
 #define ACM_PATH_NONE        0

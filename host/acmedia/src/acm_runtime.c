@@ -33,11 +33,11 @@
  *   - ACM_FRAME gives YUV420 (planar: Y at pitch, then U and V at pitch / 2)
  *     at the decoded size; other formats or sizes are ACM_E_FORMAT (the
  *     conversions and scaling are stage c).
- *   - sources: ACFS from the runtime's read-only fd, and unseekable FEED
- *     through a bounded socket queue. ACM_FEED is a nonblocking producer:
- *     short writes are back-pressure and accepted EOF half-closes the queue.
- *     Seekable FEED/NEED and CD track/LBA views are deliberately NOTAVAIL;
- *     they need protocol metadata rather than silently exposing wrong bytes.
+ *   - sources: ACFS from the runtime's read-only fd; CD from a bounded,
+ *     relative 2048-byte LBA view of that instance's image; and unseekable
+ *     FEED through a bounded socket queue. ACM_FEED is a nonblocking
+ *     producer: short writes are back-pressure and accepted EOF half-closes
+ *     the queue. Seekable FEED/NEED remains deliberately NOTAVAIL.
  *   - CONTROL: PLAY, PAUSE, STOP (paused at the start), SEEK, RATE (1/16 to
  *     16), VOLUME (kept), SETRECT, EVENTS; SELECT and TARGET are ACM_E_BADARG.
  *
@@ -112,6 +112,7 @@ struct sess {
     int fd;
     int feed_fd;
     int feed, feed_eof;
+    uint64_t source_base, source_size;
     uint32_t streams, vkind, akind, flags;
     struct acv_rect rect;
     pthread_t th;
@@ -151,6 +152,7 @@ struct probe {
     uint32_t gen;
     int32_t err;
     int fd;
+    uint64_t source_base, source_size;
     uint64_t done_ns;
     struct acm_info info;
     struct rt *rt;
@@ -181,10 +183,14 @@ static void note_why(const struct acm_worker *w) {
     pthread_mutex_unlock(&R.mu);
 }
 
-static int spawn(struct acm_worker *w, int fd, uint32_t source_flags) {
+static int spawn(struct acm_worker *w, int fd, uint32_t source_flags, uint64_t source_base, uint64_t source_size) {
     int r = acm_spawn(w, R.worker, R.hw, R.hw ? 4096 : 1536, !getenv("ACM_VERBOSE"), &R.hello);
     if (r) { note_why(w); return r; }
-    if (fd >= 0 && (r = acm_give_source_flags(w, fd, source_flags))) { note_why(w); acm_end(w); return r; }
+    if (fd >= 0) {
+        r = source_size ? acm_give_source_view(w, fd, source_base, source_size) :
+                          acm_give_source_flags(w, fd, source_flags);
+        if (r) { note_why(w); acm_end(w); return r; }
+    }
     return 0;
 }
 
@@ -207,7 +213,7 @@ static void *caps_main(void *a) {
     struct acm_worker w;
     struct acm_caps c;
     memset(&c, 0, sizeof c);
-    if (!spawn(&w, -1, 0)) {
+    if (!spawn(&w, -1, 0, 0, 0)) {
         uint32_t t, len;
         static uint8_t buf[sizeof(struct acm_caps) + 64];
         if (!acm_ask(&w, ACM_Q_CAPS, NULL, 0, NULL, 0, &t, buf, sizeof buf, &len, NULL, NULL, 10000) && t == ACM_A_CAPS && len >= sizeof c)
@@ -280,7 +286,7 @@ static void *probe_main(void *a) {
     struct acm_worker w;
     struct acm_info info;
     memset(&info, 0, sizeof info);
-    int r = spawn(&w, p->fd, 0);
+    int r = spawn(&w, p->fd, 0, p->source_base, p->source_size);
     if (!r) {
         uint32_t t, len;
         static __thread uint8_t buf[sizeof(struct acm_info) + 256];
@@ -303,10 +309,14 @@ static int32_t be_probe(void *ctx, const uint8_t *src, uint32_t srclen, uint8_t 
     (void)ctx; (void)out; (void)len;
     if (srclen < 4) return ACM_E_BADARG;
     uint32_t kind = rd(src);
-    /* FEED has no session handle through which PROBE could receive bytes;
-     * CD needs its track/LBA bounded view before it is safe to hand off. */
-    if (kind == ACMG_SRC_FEED || kind == ACMG_SRC_CD) return ACM_E_NOTAVAIL;
-    if (kind != ACMG_SRC_ACFS) return ACM_E_BADARG;
+    /* FEED has no session handle through which PROBE could receive bytes. */
+    if (kind == ACMG_SRC_FEED) return ACM_E_NOTAVAIL;
+    uint64_t source_base = 0, source_size = 0;
+    if (kind == ACMG_SRC_CD) {
+        if (srclen != 16 || !rd(src + 4) || rd(src + 4) > 99 || rd(src + 8) > rd(src + 12)) return ACM_E_BADARG;
+        source_base = (uint64_t)rd(src + 8) * 2048u;
+        source_size = ((uint64_t)rd(src + 12) - rd(src + 8) + 1u) * 2048u;
+    } else if (kind != ACMG_SRC_ACFS) return ACM_E_BADARG;
     int fd = -1;
     int32_t r = R.host->source ? R.host->source(src, srclen, &fd) : ACM_E_IO;
     if (r) return r;
@@ -322,6 +332,7 @@ static int32_t be_probe(void *ctx, const uint8_t *src, uint32_t srclen, uint8_t 
     R.probe_gen = (R.probe_gen + 1) & 0x7fffffu; if (!R.probe_gen) R.probe_gen = 1;
     memset(p, 0, sizeof *p);
     p->used = 1; p->gen = R.probe_gen; p->fd = fd;
+    p->source_base = source_base; p->source_size = source_size;
     uint32_t ticket = p->gen << 8 | (uint32_t)(p - R.probes + 1);
     pthread_mutex_unlock(&R.mu);
     pthread_t th;
@@ -406,7 +417,7 @@ static void plane_events(struct sess *s, int ms) {
 }
 
 static int sess_open(struct sess *s) {
-    int r = spawn(&s->w, s->fd, s->feed ? ACM_SOURCE_FEED : 0);
+    int r = spawn(&s->w, s->fd, s->feed ? ACM_SOURCE_FEED : 0, s->source_base, s->source_size);
     if (s->fd >= 0) { close(s->fd); s->fd = -1; }
     if (r) return r;
     struct acm_open o = {
@@ -760,7 +771,7 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
         /* A seekable feed needs the NEED/read-at protocol, not this FIFO. */
         if (rd(src + 8) & ACMG_SF_SEEKABLE) return ACM_E_NOTAVAIL;
     } else if (source_kind == ACMG_SRC_CD) {
-        return ACM_E_NOTAVAIL;             /* bounded track/LBA view is a later slice */
+        if (srclen != 16 || !rd(src + 4) || rd(src + 4) > 99 || rd(src + 8) > rd(src + 12)) return ACM_E_BADARG;
     } else if (source_kind != ACMG_SRC_ACFS) return ACM_E_BADARG;
     if (!(streams & (ACMG_ST_VIDEO | ACMG_ST_AUDIO)) || (streams & ~(ACMG_ST_VIDEO | ACMG_ST_AUDIO))) return ACM_E_FORMAT;
     uint32_t vk = video ? rd(video) : ACMG_OUT_NONE;
@@ -772,6 +783,10 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     if (!s) return ACM_E_LIMIT;
     s->rt = &R; s->slot = slot; s->handle = handle; s->streams = streams; s->vkind = vk; s->akind = ak; s->flags = flags;
     s->fd = s->feed_fd = -1; s->feed = source_kind == ACMG_SRC_FEED;
+    if (source_kind == ACMG_SRC_CD) {
+        s->source_base = (uint64_t)rd(src + 8) * 2048u;
+        s->source_size = ((uint64_t)rd(src + 12) - rd(src + 8) + 1u) * 2048u;
+    }
     s->rate = 65536; s->volume = 65536; s->state = ACM_STATE_OPENING;
     s->evmask = flags & ACMG_OF_EVENTS_FRAME ? ACMG_EVM(ACMG_EV_FRAME) : 0;
     s->rect.space = ACV_SPACE_RTG; s->rect.visible = 1;
