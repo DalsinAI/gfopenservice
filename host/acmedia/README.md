@@ -35,6 +35,24 @@ libraries stay host packages; they are not copied into GFOS, a pack or a ROM:
 
     make system                    # acmedia-worker-system and libacmedia.so
 
+On x86-64, make the directly runnable development bundle (the worker is placed
+beside the backend under the runtime name the backend discovers):
+
+    make x86-runtime
+    . build/x86_64/runtime/acmedia.env
+
+For a real cross-repository host proof, build `acaudiomixer` from the matching
+gfosmotherboards head and pass it to:
+
+    tests/run_x86_runtime.sh /path/to/acaudiomixer
+
+That proof uses the host's real dynamically linked FFmpeg worker. It opens and
+decodes the checked-in H.264/AAC fixture, verifies guest video/audio, drains the
+direct ACAHI ring through the C mixer, checks unseekable FEED, bounded seekable
+FEED/NEED and a bounded CD LBA view, and (where libdrm headers are available)
+passes 60 software-decoded frames through the acscreen COPY protocol. It does
+not use `acm_fakeworker` and is not a physical display or sound-device claim.
+
 The pinned build remains the Pi hardware-validation build because it carries
 Raspberry Pi's V4L2 request decoder:
 
