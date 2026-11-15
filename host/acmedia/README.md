@@ -23,6 +23,7 @@ on `src/acm_proto.h`. No FFmpeg type ever crosses that line.
 | `tests/acm_planetest.c`, `tests/test_planetest_copy.py` | M4K step 2: the worker's dma-bufs on a KMS overlay plane (`--test-only`, `--writeback`, `--acscreen`), plus the timed COPY/STATE-off/on regression; built where libdrm is |
 | `src/acm_runtime.c` → `libacmedia.so` | M4K step 4: the runtime's backend for the twelve ids (`acmedia_backend_v1`, `src/acmedia_service.h`, a copy of gfosmotherboards'). A worker per session and per probe, frames to acscreen's plane or to ACM_FRAME; no FFmpeg (Team 6) |
 | `src/acm_guest.h` | The guest ABI's numbers as the backend answers them, and the CAPS, INFO and RESULT block layouts (to go into amicradle-guest's `hostlib/acmedia/acmedia.h`) |
+| `src/acmedia_voice.h`, `ACMEDIA-VOICE-ABI.md` | Versioned shared PCM voice used by the direct ACAHI route; ACAudioMixer owns its consumed/played clock |
 | `tests/acm_runtime_test.c`, `tests/acm_fakeworker.c` | `libacmedia.so` loaded as the runtime loads it, against a stand-in worker (the protocol, made-up frames, no FFmpeg) and a stand-in acscreen |
 | `tests/gen_clips.sh`, `tests/gen_amiga.py`, `tests/clips/` | The short test clips (CDXL, ILBM, 8SVX and the module are written by `gen_amiga.py` from the formats' definitions) |
 | `tests/gen_long_clip.sh`, `tests/test_gen_long_clip.sh` | The reproducible, untracked 60-second H.264/AAC fixture for interactive F12/menu and interruption receipts, and its fast recipe contract test |
@@ -72,8 +73,9 @@ and the event queue; the backend gets host pointers and posts events.
   sparse/random seekable feeds remain explicit `ACM_E_NOTAVAIL` until the
   full read-at protocol lands.
 - ACM_CONTROL queues PLAY, PAUSE, STOP, SEEK, RATE, SETRECT for the session's
-  thread; EVENTS and VOLUME are kept. Frames are paced by their pts from the
-  moment PLAY lands.
+  thread; EVENTS and VOLUME are kept. Guest-audio frames are paced by their
+  PTS from the moment PLAY lands. Direct ACAHI video is instead paced by the
+  mixer's latency-corrected PLAYED counter.
 - PLANE: frames go to acscreen (`$AC_VIDEO_SOCK`) as dma-bufs, or from the
   sealed software pool with one copy into acscreen's linear scanout BO, a frame's time
   ahead of their vblank. No acscreen, or acscreen turning the plane off: RECT,
@@ -90,8 +92,24 @@ and the event queue; the backend gets host pointers and posts events.
   An active consumer plays
   audio that continues beyond video EOF, while an unread tail is abandoned
   after a bounded grace so END cannot hang. Pulling audio ahead queues crossed
-  video packets with bounded back-pressure instead of dropping them. Direct ACAHI output is not claimed
-  by this step. Seekable feeds, the CD, SELECT and TARGET are not in this step.
+  video packets with bounded back-pressure instead of dropping them.
+- ACMG_OUT_ACAHI creates `/dev/shm/amicradle-acmedia-PORT-HANDLE.acmv`
+  (`AC_MIXER_RINGS` overrides the directory). The worker converts stereo S16
+  to 44.1 kHz; the producer never overwrites unread frames. ACAudioMixer owns
+  READ, PLAYED and LATENCY. PLAY/PAUSE, VOLUME and SEEK map to the shared
+  PAUSED, GAIN_Q16 and GENERATION fields. PLAYED is the audio master: video is
+  held when more than 40 ms ahead and discarded when more than 100 ms late.
+  A drained audio EOF hands picture pacing to wall time at the last played
+  position. If READ and PLAYED do not move for two complete one-second mixer
+  discovery intervals, the session makes the same irreversible picture-only
+  fallback and drains interleaved sound without publishing it; this prevents
+  an absent or pre-v1 mixer from freezing the decoder. Non-1x RATE is
+  `ACM_E_NOTAVAIL` on this fixed-rate route.
+  The ring disappears at CLOSE. See `ACMEDIA-VOICE-ABI.md`. Physical output
+  latency and long-run A/V drift still require Pi 5 and desktop calibration.
+- Unseekable FEED, bounded seekable FEED/NEED, and bounded CD LBA views use
+  the same worker and output routes. Larger sparse/random feeds, SELECT and
+  TARGET remain later protocol work.
 - The policy: `AC_ACMEDIA_DENY`, `AC_ACMEDIA_HWONLY` (tags, comma separated),
   `AC_ACMEDIA_HW=0`. CAPS reports it, and the host's hardware decoders once a
   worker has said what they are.
@@ -100,6 +118,13 @@ and the event queue; the backend gets host pointers and posts events.
 and `acm_plane_test`, none of which needs FFmpeg:
 
     make runtime && build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so build/$(uname -m)/acm_fakeworker
+
+The sanitizer receipt uses these exact options (the runtime test deliberately
+crashes one child worker, so LeakSanitizer is disabled for that process tree):
+
+    make runtime OUT=build/asan CFLAGS='-O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -std=gnu11 -fsanitize=address,undefined -fno-omit-frame-pointer'
+    ASAN_OPTIONS='detect_leaks=0:halt_on_error=1' UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1' \
+        build/asan/acm_runtime_test build/asan/libacmedia.so build/asan/acm_fakeworker
 
 The real-file receipt runs the same backend against the real worker and the
 checked-in H.264/AAC clip:
@@ -240,6 +265,10 @@ check, for example:
   end, the end twice, seek, the same frames again;
 - audio-first demux preserves every video packet, and the runtime delivers a
   longer audio tail after video EOF while unread audio still reaches END;
+- direct ACAHI tests cover seek after cumulative READ with non-zero mixer
+  latency, audio EOF
+  before picture EOF, no mixer reader, hostile mapped capacity, stale-file
+  takeover, the READ/WRITE seek race and explicit non-1x RATE refusal;
 - the policy: a deny never opens a decoder;
 - crash, hang and leak: each ends as `ACM_E_DECODER` and the next session
   plays;
