@@ -5,3 +5,4 @@ host/*.so
 host/obj-native/
 host/acmedia/cache/
 host/acmedia/build/
+host/acmedia/tests/generated/
