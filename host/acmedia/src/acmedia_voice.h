@@ -13,7 +13,7 @@
 #define ACMV_O_MAGIC         0u /* u32 */
 #define ACMV_O_VERSION       4u /* u32 */
 #define ACMV_O_HEADER_BYTES  8u /* u32 */
-#define ACMV_O_CAPACITY     12u /* u32 frames, power of two */
+#define ACMV_O_CAPACITY     12u /* u32 frames, power of two; immutable producer value */
 #define ACMV_O_RATE         16u /* u32 */
 #define ACMV_O_CHANNELS     20u /* u32 */
 #define ACMV_O_FORMAT       24u /* u32 */
@@ -21,7 +21,7 @@
 #define ACMV_O_WRITE        32u /* u64 frames, producer/release */
 #define ACMV_O_READ         40u /* u64 frames, mixer/acquire */
 #define ACMV_O_PLAYED       48u /* u64 frames after latency, mixer/acquire */
-#define ACMV_O_LATENCY      56u /* u64 frames, mixer/acquire */
+#define ACMV_O_LATENCY      56u /* u64 frames, mixer/release */
 #define ACMV_O_ORIGIN_NS    64u /* s64 media PTS of frame zero */
 #define ACMV_O_GAIN_Q16     72u /* u32, CONTROL volume */
 #define ACMV_O_GENERATION   76u /* u32, producer */

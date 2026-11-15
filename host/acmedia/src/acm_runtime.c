@@ -57,6 +57,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -86,6 +87,7 @@ uint32_t acm_tag_parse(const char *s);
 #define RT_VOICE_CAPACITY 32768u     /* 743 ms at 44.1 kHz; power of two */
 #define RT_VIDEO_AHEAD_MS 40         /* do not present further ahead of the audio master */
 #define RT_VIDEO_LATE_MS 100         /* discard a frame this far behind played audio */
+#define RT_VOICE_READER_NS 2000000000ull /* mixer scans once a second; two misses select picture-only fallback */
 
 static void be(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
 static uint32_t rd(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
@@ -146,9 +148,14 @@ struct sess {
     int audio_drop;
     uint8_t *voice;
     size_t voice_size;
+    int voice_fd;                    /* held open and locked for stale-file takeover */
     char voice_path[4096];
     uint32_t voice_generation;
     int voice_origin_set;
+    int voice_fallback;              /* no reader, or sound ended: wall-clock picture and drain sound */
+    uint64_t voice_progress_ns, voice_last_read, voice_last_played;
+    uint64_t voice_fallback_ns;
+    int64_t voice_fallback_pts;
 };
 
 struct probe {
@@ -209,12 +216,28 @@ static int voice_open(struct sess *s) {
     int n = snprintf(s->voice_path, sizeof s->voice_path, "%s/amicradle-acmedia-%u-%u.acmv", R.rings, s->port, s->handle);
     if (n < 0 || (size_t)n >= sizeof s->voice_path) return ACM_E_TOOBIG;
     int fd = open(s->voice_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) return errno == EEXIST ? ACM_E_LIMIT : ACM_E_IO;
+    if (fd < 0 && errno == EEXIST) {
+        /* v1 has no producer PID.  An exclusive advisory lock therefore is
+         * the producer-liveness token: a crashed producer releases it, while
+         * the mixer may keep its old unlinked mapping until its next scan. */
+        int old = open(s->voice_path, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+        struct stat st;
+        if (old < 0 || fstat(old, &st) || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+            flock(old, LOCK_EX | LOCK_NB)) {
+            if (old >= 0) close(old);
+            return ACM_E_LIMIT;
+        }
+        if (unlink(s->voice_path)) { close(old); return ACM_E_IO; }
+        close(old);
+        fd = open(s->voice_path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    }
+    if (fd < 0) return ACM_E_IO;
+    if (flock(fd, LOCK_EX | LOCK_NB)) { close(fd); unlink(s->voice_path); return ACM_E_LIMIT; }
     s->voice_size = ACMV_HEADER_BYTES + (size_t)RT_VOICE_CAPACITY * 4;
     if (ftruncate(fd, (off_t)s->voice_size)) { close(fd); unlink(s->voice_path); return ACM_E_IO; }
     s->voice = mmap(NULL, s->voice_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (s->voice == MAP_FAILED) { s->voice = NULL; unlink(s->voice_path); return ACM_E_LIMIT; }
+    if (s->voice == MAP_FAILED) { s->voice = NULL; close(fd); unlink(s->voice_path); return ACM_E_LIMIT; }
+    s->voice_fd = fd;
     memset(s->voice, 0, ACMV_HEADER_BYTES);
     acmv_put_u32(s->voice, ACMV_O_MAGIC, ACMV_MAGIC);
     acmv_put_u32(s->voice, ACMV_O_VERSION, ACMV_VERSION);
@@ -227,15 +250,18 @@ static int voice_open(struct sess *s) {
     acmv_put_u32(s->voice, ACMV_O_GAIN_Q16, s->volume);
     s->voice_generation = 1;
     acmv_put_u32(s->voice, ACMV_O_GENERATION, s->voice_generation);
+    s->voice_progress_ns = now_ns();
     return 0;
 #endif
 }
 
 static void voice_close(struct sess *s) {
     if (!s->voice) return;
+    unlink(s->voice_path);
     munmap(s->voice, s->voice_size);
     s->voice = NULL;
-    unlink(s->voice_path);
+    if (s->voice_fd >= 0) close(s->voice_fd);
+    s->voice_fd = -1;
     s->voice_path[0] = 0;
 }
 
@@ -246,20 +272,33 @@ static void voice_reset(struct sess *s, int64_t ms) {
     if (!s->voice) return;
     uint64_t read = acmv_u64(s->voice, ACMV_O_READ);
     acmv_put_u64(s->voice, ACMV_O_WRITE, read);
-    acmv_put_u64(s->voice, ACMV_O_ORIGIN_NS, (uint64_t)(ms > 0 ? ms : 0) * 1000000ull);
+    uint64_t played = acmv_u64(s->voice, ACMV_O_PLAYED);
+    int64_t origin = (ms > 0 ? ms : 0) * 1000000ll - (int64_t)(played * 1000000000ull / ACMV_RATE);
+    acmv_put_u64(s->voice, ACMV_O_ORIGIN_NS, (uint64_t)origin);
     s->voice_origin_set = 1;
     acmv_put_u32(s->voice, ACMV_O_GENERATION, ++s->voice_generation);
+    /* READ may have advanced between the first load/store.  It is a
+     * consumer-owned monotonic cursor, so resynchronise rather than treating
+     * that legitimate seek race as corrupt decoder output. */
+    read = acmv_u64(s->voice, ACMV_O_READ);
+    acmv_put_u64(s->voice, ACMV_O_WRITE, read);
     voice_flags(s, 0, ACMV_F_EOF);
+    s->voice_fallback = 0;
+    s->voice_last_read = read;
+    s->voice_last_played = played;
+    s->voice_progress_ns = now_ns();
 }
 
 /* Copy as much queued worker PCM as the mixer has made room for. The worker
  * gives native little-endian S16 on the supported Linux hosts. */
 static int voice_flush(struct sess *s) {
-    if (!s->voice) return 0;
+    if (!s->voice || s->voice_fallback) return 0;
     uint64_t read = acmv_u64(s->voice, ACMV_O_READ);
     uint64_t write = acmv_u64(s->voice, ACMV_O_WRITE);
-    uint32_t cap = acmv_u32(s->voice, ACMV_O_CAPACITY);
-    if (write < read || write - read > cap) return ACM_E_DECODER;
+    const uint32_t cap = RT_VOICE_CAPACITY; /* the writable mapped header is not trusted */
+    if (write < read) { write = read; acmv_put_u64(s->voice, ACMV_O_WRITE, write); }
+    if (write - read > cap) return ACM_E_DECODER;
+    if (acmv_u32(s->voice, ACMV_O_CAPACITY) != cap) acmv_put_u32(s->voice, ACMV_O_CAPACITY, cap);
     while (s->aqn && write - read < cap) {
         struct audio_block *q = &s->aq[s->aqh];
         uint32_t total = q->a.frames, left = total - q->sent_frames;
@@ -281,9 +320,45 @@ static int voice_flush(struct sess *s) {
         acmv_put_u64(s->voice, ACMV_O_WRITE, write);
         if (q->sent_frames == total) { s->aqh = (s->aqh + 1) % RT_AUDIO_QUEUE; s->aqn--; }
         read = acmv_u64(s->voice, ACMV_O_READ);
-        if (write < read || write - read > cap) return ACM_E_DECODER;
+        if (write < read) { write = read; acmv_put_u64(s->voice, ACMV_O_WRITE, write); }
+        if (write - read > cap) return ACM_E_DECODER;
     }
     return 0;
+}
+
+static int64_t voice_media_ms(struct sess *s, uint64_t played) {
+    int64_t origin_ns = (int64_t)acmv_u64(s->voice, ACMV_O_ORIGIN_NS);
+    return origin_ns / 1000000ll + (int64_t)(played * 1000 / ACMV_RATE);
+}
+
+/* Called with s->mu held.  ACAudioMixer discovers voices once a second.  If
+ * neither of its cursors has moved for two complete scans, continuing to fill
+ * the bounded ring would deadlock both an interleaved decoder and picture.
+ * Commit to a picture wall clock for the rest of this session and drain (but
+ * do not publish) subsequent sound.  The same clock hand-off is used after a
+ * shorter audio stream has actually drained. */
+static void voice_check_fallback(struct sess *s) {
+    if (!s->voice || s->voice_fallback) return;
+    uint64_t n = now_ns();
+    uint64_t read = acmv_u64(s->voice, ACMV_O_READ);
+    uint64_t write = acmv_u64(s->voice, ACMV_O_WRITE);
+    uint64_t played = acmv_u64(s->voice, ACMV_O_PLAYED);
+    if (read != s->voice_last_read || played != s->voice_last_played) {
+        s->voice_last_read = read;
+        s->voice_last_played = played;
+        s->voice_progress_ns = n;
+    }
+    int drained_eof = s->aeof && read >= write;
+    int no_reader = s->state == ACM_STATE_PLAYING && (write > read || s->aqn) &&
+                    n - s->voice_progress_ns >= RT_VOICE_READER_NS;
+    if (!drained_eof && !no_reader) return;
+    s->voice_fallback = 1;
+    s->voice_fallback_ns = n;
+    s->voice_fallback_pts = s->voice_origin_set ? voice_media_ms(s, played) : s->pos_ms;
+    s->aqh = s->aqn = 0;
+    /* A late old mixer must not receive a ring full of stale pre-fallback
+     * samples.  READ is untrusted as a count but safe as a modulo cursor. */
+    acmv_put_u64(s->voice, ACMV_O_WRITE, read);
 }
 
 /* ---- the policy and the caps ---- */
@@ -577,7 +652,16 @@ static void run_cmd(struct sess *s, struct cmd c) {
     switch (c.k) {
     case C_PLAY:
         pthread_mutex_lock(&s->mu);
-        if (s->state == ACM_STATE_PAUSED) { s->state = ACM_STATE_PLAYING; s->based = 0; voice_flags(s, 0, ACMV_F_PAUSED); }
+        if (s->state == ACM_STATE_PAUSED) {
+            s->state = ACM_STATE_PLAYING;
+            s->based = 0;
+            if (s->voice && !s->voice_fallback) {
+                s->voice_last_read = acmv_u64(s->voice, ACMV_O_READ);
+                s->voice_last_played = acmv_u64(s->voice, ACMV_O_PLAYED);
+                s->voice_progress_ns = now_ns();
+            }
+            voice_flags(s, 0, ACMV_F_PAUSED);
+        }
         pthread_mutex_unlock(&s->mu);
         break;
     case C_PAUSE:
@@ -638,6 +722,7 @@ static int wait_until(struct sess *s, uint64_t t) {
  * only the copied byte count. */
 static int step_audio(struct sess *s) {
     pthread_mutex_lock(&s->mu);
+    voice_check_fallback(s);
     int vr = voice_flush(s);
     if (vr) { pthread_mutex_unlock(&s->mu); return vr; }
     /* Once video has ended, or its decoder is applying cross-stream
@@ -672,15 +757,17 @@ static int step_audio(struct sess *s) {
     if (!a.frames || a.sample_rate != s->op.sample_rate || a.channels != 2 || bytes > sizeof s->aq[0].data || len != sizeof a + bytes)
         return ACM_E_DECODER;
     pthread_mutex_lock(&s->mu);
-    struct audio_block *q = &s->aq[(s->aqh + s->aqn) % RT_AUDIO_QUEUE];
-    q->a = a;
-    q->bytes = (uint32_t)bytes;
-    q->sent_frames = 0;
-    memcpy(q->data, buf + sizeof a, (size_t)bytes);
-    s->aqn++;
     int64_t end = a.pts_ms >= 0 ? a.pts_ms : s->audio_until_ms;
     end += (int64_t)(((uint64_t)a.frames * 1000 + a.sample_rate - 1) / a.sample_rate);
     if (end > s->audio_until_ms) s->audio_until_ms = end;
+    if (!s->voice_fallback) {
+        struct audio_block *q = &s->aq[(s->aqh + s->aqn) % RT_AUDIO_QUEUE];
+        q->a = a;
+        q->bytes = (uint32_t)bytes;
+        q->sent_frames = 0;
+        memcpy(q->data, buf + sizeof a, (size_t)bytes);
+        s->aqn++;
+    }
     pthread_mutex_unlock(&s->mu);
     return 0;
 }
@@ -692,9 +779,15 @@ static int step_audio(struct sess *s) {
 static int voice_sync_video(struct sess *s, int64_t pts_ms) {
     if (!s->voice || pts_ms < 0 || !s->voice_origin_set) return 0;
     for (;;) {
-        int64_t origin_ms = (int64_t)acmv_u64(s->voice, ACMV_O_ORIGIN_NS) / 1000000;
+        pthread_mutex_lock(&s->mu);
+        voice_check_fallback(s);
+        int fallback = s->voice_fallback;
+        uint64_t fallback_ns = s->voice_fallback_ns;
+        int64_t fallback_pts = s->voice_fallback_pts;
+        pthread_mutex_unlock(&s->mu);
         uint64_t played = acmv_u64(s->voice, ACMV_O_PLAYED);
-        int64_t audio_ms = origin_ms + (int64_t)(played * 1000 / ACMV_RATE);
+        int64_t audio_ms = fallback ? fallback_pts + (int64_t)((now_ns() - fallback_ns) / 1000000ull)
+                                    : voice_media_ms(s, played);
         if (pts_ms + RT_VIDEO_LATE_MS < audio_ms) return -1;
         if (pts_ms <= audio_ms + RT_VIDEO_AHEAD_MS) return 0;
         pthread_mutex_lock(&s->mu);
@@ -905,7 +998,7 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     if (ak != ACMG_OUT_NONE && ak != ACMG_OUT_GUEST && ak != ACMG_OUT_ACAHI) return ACM_E_BADARG;
     struct sess *s = calloc(1, sizeof *s);
     if (!s) return ACM_E_LIMIT;
-    s->rt = &R; s->slot = slot; s->handle = handle; s->port = port; s->streams = streams; s->vkind = vk; s->akind = ak; s->flags = flags; s->fd = -1;
+    s->rt = &R; s->slot = slot; s->handle = handle; s->port = port; s->streams = streams; s->vkind = vk; s->akind = ak; s->flags = flags; s->fd = -1; s->voice_fd = -1;
     s->rate = 65536; s->volume = 65536; s->state = ACM_STATE_OPENING;
     s->evmask = flags & ACMG_OF_EVENTS_FRAME ? ACMG_EVM(ACMG_EV_FRAME) : 0;
     s->rect.space = ACV_SPACE_RTG; s->rect.visible = 1;
@@ -972,6 +1065,7 @@ static int32_t be_control(void *ctx, uint32_t slot, uint32_t cmd, const uint32_t
         break;
     case ACMG_CTL_RATE:
         if (a[0] < 4096 || a[0] > 16u * 65536) { r = ACM_E_BADARG; break; }
+        if (s->akind == ACMG_OUT_ACAHI && a[0] != 65536) { r = ACM_E_NOTAVAIL; break; }
         s->rate = a[0];
         r = queue(s, C_RATE, 0, 0);
         break;

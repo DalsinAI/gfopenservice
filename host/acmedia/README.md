@@ -86,6 +86,12 @@ and the event queue; the backend gets host pointers and posts events.
   READ, PLAYED and LATENCY. PLAY/PAUSE, VOLUME and SEEK map to the shared
   PAUSED, GAIN_Q16 and GENERATION fields. PLAYED is the audio master: video is
   held when more than 40 ms ahead and discarded when more than 100 ms late.
+  A drained audio EOF hands picture pacing to wall time at the last played
+  position. If READ and PLAYED do not move for two complete one-second mixer
+  discovery intervals, the session makes the same irreversible picture-only
+  fallback and drains interleaved sound without publishing it; this prevents
+  an absent or pre-v1 mixer from freezing the decoder. Non-1x RATE is
+  `ACM_E_NOTAVAIL` on this fixed-rate route.
   The ring disappears at CLOSE. See `ACMEDIA-VOICE-ABI.md`. Physical output
   latency and long-run A/V drift still require Pi 5 and desktop calibration.
   Feeds, the CD, SELECT and TARGET are not in this step.
@@ -97,6 +103,13 @@ and the event queue; the backend gets host pointers and posts events.
 and `acm_plane_test`, none of which needs FFmpeg:
 
     make runtime && build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so build/$(uname -m)/acm_fakeworker
+
+The sanitizer receipt uses these exact options (the runtime test deliberately
+crashes one child worker, so LeakSanitizer is disabled for that process tree):
+
+    make runtime OUT=build/asan CFLAGS='-O1 -g -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -std=gnu11 -fsanitize=address,undefined -fno-omit-frame-pointer'
+    ASAN_OPTIONS='detect_leaks=0:halt_on_error=1' UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1' \
+        build/asan/acm_runtime_test build/asan/libacmedia.so build/asan/acm_fakeworker
 
 The real-file receipt runs the same backend against the real worker and the
 checked-in H.264/AAC clip:
@@ -156,6 +169,9 @@ the stream.
   end, the end twice, seek, the same frames again;
 - audio-first demux preserves every video packet, and the runtime delivers a
   longer audio tail after video EOF while unread audio still reaches END;
+- direct ACAHI tests cover seek after a cumulative PLAYED clock, audio EOF
+  before picture EOF, no mixer reader, hostile mapped capacity, stale-file
+  takeover, the READ/WRITE seek race and explicit non-1x RATE refusal;
 - the policy: a deny never opens a decoder;
 - crash, hang and leak: each ends as `ACM_E_DECODER` and the next session
   plays;

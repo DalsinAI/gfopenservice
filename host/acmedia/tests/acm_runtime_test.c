@@ -464,6 +464,8 @@ int main(int argc, char **argv) {
     file("av.fake", "FAKE 64 48 10 25 audio=1\n");
     file("av-unread.fake", "FAKE 64 48 25 25 audio=1\n");
     file("av-tail.fake", "FAKE 64 48 4 25 audio=1 audio_samples=6400\n");
+    file("av-short-audio.fake", "FAKE 64 48 100 25 audio=1 audio_samples=22050\n");
+    file("av-seek.fake", "FAKE 64 48 100 25 audio=1\n");
     file("bad-offset.fake", "FAKE 64 48 2 25 bad=offset\n");
     file("bad-height.fake", "FAKE 64 48 2 25 bad=height\n");
     file("bad-pool.fake", "FAKE 64 48 2 25 bad=pool\n");
@@ -651,13 +653,18 @@ int main(int argc, char **argv) {
     B->info(B->ctx, 2, out, sizeof out);
     CHECK(rd(out + 4 * ACM_IH_AROUTE) == ACMG_ROUTE_ACAHI && B->audio(B->ctx, 2, out, sizeof out, ACMG_SND_S16, 44100) == ACM_E_FORMAT,
           "INFO says ACAHI and ACM_AUDIO does not duplicate it");
+    a4[0] = 2 * 65536;
+    CHECK(B->control(B->ctx, 2, ACMG_CTL_RATE, a4) == ACM_E_NOTAVAIL, "direct ACAHI refuses a non-1x RATE");
     a4[0] = 32768;
     CHECK(B->control(B->ctx, 2, ACMG_CTL_VOLUME, a4) == 0 && acmv_u32(vm, ACMV_O_GAIN_Q16) == 32768, "VOLUME is voice Q16 gain");
     a4[0] = 0;
+    acmv_put_u32(vm, ACMV_O_CAPACITY, 0xffffffffu);
     CHECK(B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0, "direct ACAHI PLAY");
     uint64_t vd = ms_now() + 3000;
     while (acmv_u64(vm, ACMV_O_WRITE) == 0 && ms_now() < vd) usleep(1000);
-    CHECK(acmv_u64(vm, ACMV_O_WRITE) > 0 && !(acmv_u32(vm, ACMV_O_FLAGS) & ACMV_F_PAUSED), "worker PCM reaches the bounded voice");
+    CHECK(acmv_u64(vm, ACMV_O_WRITE) > 0 && acmv_u32(vm, ACMV_O_CAPACITY) == 32768 &&
+          !(acmv_u32(vm, ACMV_O_FLAGS) & ACMV_F_PAUSED),
+          "worker PCM uses the compiled bound, not a hostile mapped CAPACITY");
     CHECK(B->control(B->ctx, 2, ACMG_CTL_PAUSE, a4) == 0, "direct ACAHI PAUSE");
     vd = ms_now() + 1000;
     while (!(acmv_u32(vm, ACMV_O_FLAGS) & ACMV_F_PAUSED) && ms_now() < vd) usleep(1000);
@@ -674,6 +681,18 @@ int main(int argc, char **argv) {
     vd = ms_now() + 2000;
     while (!access(vp, F_OK) && ms_now() < vd) usleep(1000);
     CHECK(access(vp, F_OK) != 0, "CLOSE removes the direct voice");
+
+    /* A producer crash releases its advisory lock but can leave the name.
+     * The next identical route atomically replaces that stale regular file. */
+    int stale = open(vp, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    CHECK(stale >= 0 && !ftruncate(stale, ACMV_HEADER_BYTES), "make a crashed producer's stale voice");
+    if (stale >= 0) close(stale);
+    from = nev_now();
+    r = B->open(B->ctx, 2, ah, d, srcd(d, "av-unread.fake"), ACMG_ST_AUDIO, NULL, ahi, 59911, 0);
+    CHECK(r == ACM_PENDING && wait_ev(ah, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
+          "direct ACAHI safely takes over an unlocked stale voice");
+    B->close(B->ctx, 2);
+    vd = ms_now() + 2000; while (!access(vp, F_OK) && ms_now() < vd) usleep(1000);
 
     /* The latency-corrected PLAYED counter paces video, not wall time. With
      * PLAYED held at zero, at most the 0/40 ms frames may be presented. */
@@ -697,6 +716,90 @@ int main(int argc, char **argv) {
           "PLAYED advances video and frames over 100 ms late are dropped (PTS %u)", e.a);
     munmap(vm, (size_t)vst.st_size);
     B->close(B->ctx, 2);
+
+    /* With no mixer reader the ring fills.  After two complete discovery
+     * intervals the route becomes picture-wall-clock and drains sound, so an
+     * interleaved worker reaches END instead of freezing. */
+    from = nev_now(); ah = 0x402;
+    r = B->open(B->ctx, 2, ah, d, srcd(d, "av-unread.fake"), ACMG_ST_VIDEO | ACMG_ST_AUDIO,
+                gtarget, ahi, 59913, ACMG_OF_EVENTS_FRAME);
+    uint64_t no_reader_at = ms_now();
+    CHECK(r == ACM_PENDING && wait_ev(ah, ACMG_EV_OPENED, &from, 5000, &e) >= 0 &&
+          B->control(B->ctx, 2, ACMG_CTL_PLAY, a4) == 0 &&
+          wait_ev(ah, ACMG_EV_END, &from, 6000, &e) >= 0 && ms_now() - no_reader_at >= 1900 &&
+          count_ev(ah, ACMG_EV_ERROR, 0) == 0,
+          "no-reader ACAHI falls back after its bound and reaches END");
+    B->close(B->ctx, 2);
+
+    /* Sound ends at 0.5 s while picture continues to 4 s.  Drain the voice
+     * like the real mixer; once EOF sound is drained, picture keeps wall time. */
+    from = nev_now(); ah = 0x502;
+    r = B->open(B->ctx, 2, ah, d, srcd(d, "av-short-audio.fake"), ACMG_ST_VIDEO | ACMG_ST_AUDIO,
+                gtarget, ahi, 59914, ACMG_OF_EVENTS_FRAME);
+    CHECK(r == ACM_PENDING && wait_ev(ah, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
+          "short-sound/long-picture ACAHI opens");
+    snprintf(vp, sizeof vp, "%s/amicradle-acmedia-59914-%u.acmv", dir, ah);
+    vfd = open(vp, O_RDWR | O_CLOEXEC); fstat(vfd, &vst);
+    vm = mmap(NULL, (size_t)vst.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, vfd, 0); close(vfd);
+    a4[0] = 0; B->control(B->ctx, 2, ACMG_CTL_PLAY, a4);
+    uint64_t long_deadline = ms_now() + 7000;
+    while (!count_ev(ah, ACMG_EV_END, from) && ms_now() < long_deadline) {
+        voice_write = acmv_u64(vm, ACMV_O_WRITE);
+        acmv_put_u64(vm, ACMV_O_READ, voice_write);
+        acmv_put_u64(vm, ACMV_O_PLAYED, voice_write);
+        usleep(1000);
+    }
+    CHECK(count_ev(ah, ACMG_EV_END, from) != 0 && count_ev(ah, ACMG_EV_ERROR, from) == 0,
+          "short sound does not freeze the remaining picture; END arrives");
+    munmap(vm, (size_t)vst.st_size); B->close(B->ctx, 2);
+
+    /* PLAYED is cumulative across generations.  Seek therefore subtracts
+     * its current value from ORIGIN; also force READ one step ahead of WRITE
+     * to cover the real generation/cursor race. */
+    from = nev_now(); ah = 0x602;
+    r = B->open(B->ctx, 2, ah, d, srcd(d, "av-seek.fake"), ACMG_ST_VIDEO | ACMG_ST_AUDIO,
+                gtarget, ahi, 59915, ACMG_OF_EVENTS_FRAME);
+    CHECK(r == ACM_PENDING && wait_ev(ah, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
+          "seek-clock ACAHI opens");
+    snprintf(vp, sizeof vp, "%s/amicradle-acmedia-59915-%u.acmv", dir, ah);
+    vfd = open(vp, O_RDWR | O_CLOEXEC); fstat(vfd, &vst);
+    vm = mmap(NULL, (size_t)vst.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, vfd, 0); close(vfd);
+    a4[0] = 0; B->control(B->ctx, 2, ACMG_CTL_PLAY, a4);
+    int64_t before_seek_pts = -1;
+    int seek_frames = nev_now();
+    uint64_t seek_deadline = ms_now() + 4000;
+    while (before_seek_pts < 600 && ms_now() < seek_deadline) {
+        voice_write = acmv_u64(vm, ACMV_O_WRITE);
+        acmv_put_u64(vm, ACMV_O_READ, voice_write);
+        acmv_put_u64(vm, ACMV_O_PLAYED, voice_write);
+        if (wait_ev(ah, ACMG_EV_FRAME, &seek_frames, 50, &e) >= 0) before_seek_pts = e.a;
+    }
+    uint64_t played_before_seek = acmv_u64(vm, ACMV_O_PLAYED);
+    vg = acmv_u32(vm, ACMV_O_GENERATION);
+    a4[0] = 200; a4[1] = ACMG_SEEK_EXACT;
+    CHECK(before_seek_pts >= 600 && B->control(B->ctx, 2, ACMG_CTL_SEEK, a4) == 0,
+          "seek-clock accumulates PLAYED, then queues SEEK 200 ms");
+    seek_deadline = ms_now() + 2000;
+    while (acmv_u32(vm, ACMV_O_GENERATION) == vg && ms_now() < seek_deadline) usleep(1000);
+    uint64_t raced_write = acmv_u64(vm, ACMV_O_WRITE);
+    acmv_put_u64(vm, ACMV_O_READ, raced_write + 256);
+    int after_seek = nev_now();
+    int64_t after_seek_pts = -1;
+    seek_deadline = ms_now() + 3000;
+    while (after_seek_pts < 0 && ms_now() < seek_deadline) {
+        voice_write = acmv_u64(vm, ACMV_O_WRITE);
+        uint64_t voice_read = acmv_u64(vm, ACMV_O_READ);
+        if (voice_write >= voice_read) {
+            acmv_put_u64(vm, ACMV_O_READ, voice_write);
+            acmv_put_u64(vm, ACMV_O_PLAYED, voice_write);
+        }
+        if (wait_ev(ah, ACMG_EV_FRAME, &after_seek, 50, &e) >= 0) after_seek_pts = e.a;
+    }
+    CHECK(played_before_seek > 22050 && after_seek_pts >= 160 && after_seek_pts <= 360 &&
+          count_ev(ah, ACMG_EV_ERROR, after_seek) == 0,
+          "SEEK uses a relative cumulative clock and survives READ/WRITE race (PTS %lld)",
+          (long long)after_seek_pts);
+    munmap(vm, (size_t)vst.st_size); B->close(B->ctx, 2);
 
     CHECK(B->open(B->ctx, 2, 0x102, d, srcd(d, "missing.fake"), ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_IO, "a missing source: ACM_E_IO at once");
     from = nev_now();
