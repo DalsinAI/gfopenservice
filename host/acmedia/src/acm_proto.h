@@ -129,6 +129,7 @@ struct acm_info {
 
 /* OPEN: which streams (-1 the best one, -2 none) */
 struct acm_open { int32_t video, audio; uint32_t flags, pad; };
+#define ACM_OF_AUDIO_44100 1u       /* direct ACAHI: worker converts stereo S16 to 44.1 kHz */
 #define ACM_PIX_YUV420P  1
 #define ACM_PIX_NV12     2
 #define ACM_PIX_YUV420P10 3

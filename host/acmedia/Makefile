@@ -43,6 +43,18 @@ runtime: $(OUT)/acm_plane_test $(RUNTIME)
 # build because it carries the Raspberry Pi request decoder.
 system: $(OUT)/acmedia-worker-system $(OUT)/acm_test runtime
 
+# A runnable x86-64 development bundle.  The backend intentionally looks for
+# `acmedia-worker` beside libacmedia.so; keep the system-linked worker's build
+# name distinct, then copy it into the bundle under that runtime name.
+x86-runtime:
+	@test "$(ARCH)" = x86_64 || { echo "x86-runtime: ARCH must be x86_64" >&2; exit 2; }
+	$(MAKE) ARCH=$(ARCH) OUT=$(OUT) system $(PLANETEST)
+	mkdir -p $(OUT)/runtime
+	install -m 0755 $(OUT)/acmedia-worker-system $(OUT)/runtime/acmedia-worker
+	install -m 0755 $(OUT)/libacmedia.so $(OUT)/runtime/libacmedia.so
+	printf "AC_ACMEDIA_DIR='%s'\nexport AC_ACMEDIA_DIR\n" '$(abspath $(OUT)/runtime)' >$(OUT)/runtime/acmedia.env
+	@echo "x86 runtime: $(abspath $(OUT)/runtime)"
+
 $(OUT):
 	mkdir -p $@
 
@@ -77,4 +89,4 @@ $(OUT)/acm_runtime_test: tests/acm_runtime_test.c src/*.h | $(OUT)
 clean:
 	rm -f $(OUT)/acmedia-worker $(OUT)/acmedia-worker-test $(OUT)/acmedia-worker-system $(OUT)/acm_test $(OUT)/acm_plane_test $(OUT)/acm_planetest $(RUNTIME)
 
-.PHONY: all clean runtime system
+.PHONY: all clean runtime system x86-runtime
