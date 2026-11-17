@@ -39,8 +39,16 @@
 
 #define PENDING 64
 
+#define SESSIONS 16
+
 struct env {
     SSL_CTX *ctx;
+    struct {                        /* TLS sessions kept per host name (wfnet_amiga.c's twin) */
+        char host[256];
+        SSL_SESSION *s;
+        unsigned long used;
+    } sess[SESSIONS];
+    unsigned long clock;
     int decoders;
     unsigned char dt_seen;
     struct {                        /* connections under way, with the addresses still to try */
@@ -53,6 +61,36 @@ struct tls {
     SSL *ssl;
     char host[256];
 };
+
+static int session_find(struct env *e, const char *host)
+{
+    int i;
+    for (i = 0; i < SESSIONS; i++)
+        if (e->sess[i].s && !strcmp(e->sess[i].host, host))
+            return i;
+    return -1;
+}
+
+static void session_keep(struct env *e, const char *host, SSL_SESSION *s)
+{
+    int i = session_find(e, host), j;
+    if (i < 0) {
+        i = 0;
+        for (j = 0; j < SESSIONS; j++) {
+            if (!e->sess[j].s) {
+                i = j;
+                break;
+            }
+            if (e->sess[j].used < e->sess[i].used)
+                i = j;
+        }
+    }
+    if (e->sess[i].s)
+        SSL_SESSION_free(e->sess[i].s);
+    snprintf(e->sess[i].host, sizeof e->sess[i].host, "%s", host);
+    e->sess[i].s = s;
+    e->sess[i].used = ++e->clock;
+}
 
 static void *p_alloc(void *env, unsigned long n)
 {
@@ -262,6 +300,13 @@ static void *p_tls_new(void *env, long sock, const char *host, const char *alpn)
     }
     SSL_set_alpn_protos(t->ssl, wire, n);
     SSL_set_connect_state(t->ssl);
+    {
+        int i = session_find(e, host);
+        if (i >= 0) {
+            SSL_set_session(t->ssl, e->sess[i].s);
+            e->sess[i].used = ++e->clock;
+        }
+    }
     return t;
 }
 
@@ -327,8 +372,8 @@ static unsigned long p_tls_info(void *env, void *tls, char *out, unsigned long r
     *verified = 0;
     if (SSL_is_init_finished(t->ssl)) {
         *verified = v == X509_V_OK;
-        n = snprintf(out, room, "tls=%s\ncipher=%s\nverified=%s\n", SSL_get_version(t->ssl),
-                     SSL_get_cipher_name(t->ssl), *verified ? "yes" : "no");
+        n = snprintf(out, room, "tls=%s\ncipher=%s\nverified=%s\nresumed=%s\n", SSL_get_version(t->ssl),
+                     SSL_get_cipher_name(t->ssl), *verified ? "yes" : "no", SSL_session_reused(t->ssl) ? "yes" : "no");
     } else if (v != X509_V_OK)
         n = snprintf(out, room, "error=%s\n", X509_verify_cert_error_string(v));
     else {
@@ -361,7 +406,20 @@ static const char *p_tls_alpn(void *env, void *tls)
 static void p_tls_free(void *env, void *tls)
 {
     struct tls *t = tls;
-    (void)env;
+    /* OpenSSL makes a TLS 1.3 session when the server's ticket is read, so
+     * it is taken as the connection goes (GFOpenTLS fills the one taken
+     * after the handshake in place instead). close_notify first, as
+     * a_tls_free's OT_Close(): SSL_free() of a connection that sent none
+     * marks its session as not to be resumed. */
+    if (SSL_is_init_finished(t->ssl))
+        SSL_shutdown(t->ssl);
+    if (SSL_is_init_finished(t->ssl) && !SSL_session_reused(t->ssl)) {
+        SSL_SESSION *s = SSL_get1_session(t->ssl);
+        if (s && SSL_SESSION_is_resumable(s))
+            session_keep(env, t->host, s);
+        else if (s)
+            SSL_SESSION_free(s);
+    }
     SSL_free(t->ssl);
     free(t);
 }
@@ -512,7 +570,11 @@ long wfnp_call(struct wfnp *p, unsigned op, unsigned long arg, const unsigned lo
 
 void wfnp_free(struct wfnp *p)
 {
+    int i;
     wfn_free(p->w);
+    for (i = 0; i < SESSIONS; i++)
+        if (p->e->sess[i].s)
+            SSL_SESSION_free(p->e->sess[i].s);
     SSL_CTX_free(p->e->ctx);
     free(p->e);
     free(p);

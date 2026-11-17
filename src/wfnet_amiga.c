@@ -67,6 +67,12 @@ extern struct DosLibrary *DOSBase;
 #define DIRECT  48              /* objects made from the class itself, at most (3 per fetch's decoder) */
 #define ADDRS   4               /* and how many of those each keeps */
 
+/* TLS sessions kept per host name, to resume the next connection's
+ * handshake: a resumed one needs no certificate chain and no RSA or ECDSA
+ * check, which on a 68040 are most of a full handshake. */
+#define SESSIONS 16
+#define SESSION_HOST 96
+
 struct wfna {
     struct Library *socketbase;
     struct Library *tlsbase;
@@ -82,6 +88,12 @@ struct wfna {
     ULONG seed;
     struct wfn *w;
     struct {
+        char host[SESSION_HOST];
+        struct OTSession *s;
+        ULONG used;             /* when last offered or taken: the oldest goes first */
+    } sess[SESSIONS];
+    ULONG clock;
+    struct {
         LONG sock;
         UWORD port, left;       /* left: addresses still to try, the last first; 0, a free entry */
         ULONG addr[ADDRS];
@@ -91,7 +103,41 @@ struct wfna {
 struct tls {
     struct OTConnection *conn;
     LONG status;                /* the handshake's answer */
+    UBYTE resumed;              /* the handshake resumed a kept session */
+    char host[SESSION_HOST];
 };
+
+static int session_find(struct wfna *e, const char *host)
+{
+    int i;
+    for (i = 0; i < SESSIONS; i++)
+        if (e->sess[i].s && !strcmp(e->sess[i].host, host))
+            return i;
+    return -1;
+}
+
+/* Keeps s for host (in place of one there was, else of the oldest). */
+static void session_keep(struct wfna *e, const char *host, struct OTSession *s)
+{
+    int i = session_find(e, host), j;
+    if (i < 0) {
+        i = 0;
+        for (j = 0; j < SESSIONS; j++) {
+            if (!e->sess[j].s) {
+                i = j;
+                break;
+            }
+            if (e->sess[j].used < e->sess[i].used)
+                i = j;
+        }
+    }
+    if (e->sess[i].s)
+        OT_FreeSession(e->sess[i].s);
+    strncpy(e->sess[i].host, host, SESSION_HOST - 1);
+    e->sess[i].host[SESSION_HOST - 1] = 0;
+    e->sess[i].s = s;
+    e->sess[i].used = ++e->clock;
+}
 
 static void *a_alloc(void *env, unsigned long n)
 {
@@ -290,6 +336,14 @@ static void *a_tls_new(void *env, long sock, const char *host, const char *alpn)
     OT_SetSocket(t->conn, sock, e->socketbase);
     OT_SetALPN(t->conn, (CONST_STRPTR)alpn);
     t->status = OTERR_WOULDBLOCK;
+    if (strlen(host) < SESSION_HOST) {
+        int i = session_find(e, host);
+        strcpy(t->host, host);
+        if (i >= 0) {
+            OT_SetSession(t->conn, e->sess[i].s);   /* copied: a full handshake if the server will not resume */
+            e->sess[i].used = ++e->clock;
+        }
+    }
     return t;
 }
 
@@ -298,8 +352,18 @@ static int a_tls_handshake(void *env, void *tls)
     struct wfna *e = env;
     struct tls *t = tls;
     t->status = OT_Handshake(t->conn);
-    if (t->status == OTERR_OK)
+    if (t->status == OTERR_OK) {
+        t->resumed = OT_SessionResumed(t->conn) ? 1 : 0;
+        /* After a full handshake, its session: on TLS 1.3 it is filled in
+         * place by the OT_Read() that reads the server's ticket. A resumed
+         * connection leaves the kept one as it is. */
+        if (!t->resumed && t->host[0]) {
+            struct OTSession *s = OT_GetSession(t->conn);
+            if (s)
+                session_keep(e, t->host, s);
+        }
         return 0;
+    }
     return t->status == OTERR_WOULDBLOCK ? WFN_AGAIN : WFN_FAIL;
 }
 
@@ -351,6 +415,7 @@ static unsigned long a_tls_info(void *env, void *tls, char *out, unsigned long r
         at = put(out, at, room, v == OT_TLS13 ? "tls=TLSv1.3\ncipher=" : "tls=TLSv1.2\ncipher=");
         at = put(out, at, room, (const char *)OT_GetCipher(t->conn));
         at = put(out, at, room, "\nverified=yes\n");
+        at = put(out, at, room, t->resumed ? "resumed=yes\n" : "resumed=no\n");
         *verified = 1;                          /* OTV_FULL: chain, dates and name all checked */
     } else {
         at = put(out, at, room, "error=");
@@ -589,6 +654,12 @@ void wfna_free(struct wfna *e)
     if (!e)
         return;
     wfn_free(e->w);                             /* closes its sockets and TLS connections first */
+    {
+        int i;
+        for (i = 0; i < SESSIONS; i++)
+            if (e->sess[i].s)
+                OT_FreeSession(e->sess[i].s);
+    }
     if (e->ctx)
         OT_FreeContext(e->ctx);
     if (e->tlsbase)
