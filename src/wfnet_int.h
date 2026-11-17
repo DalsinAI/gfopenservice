@@ -113,6 +113,7 @@ struct wfn {
     struct wfn_conn *conns;
     unsigned long next_handle;
     int nfetch, nconn;
+    int more;                   /* progress() stopped at its round limit with things still moving */
 };
 
 /* src/wfnet.c, for the HTTP/2 side */
