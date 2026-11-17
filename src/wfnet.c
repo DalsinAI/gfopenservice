@@ -1591,6 +1591,7 @@ static void progress(struct wfn *w)
         if (!changed)
             break;
     }
+    w->more = changed;
     /* Timeouts: the server has been silent too long (not while the caller lets the ring fill). */
     {
         unsigned long t = now(w);
@@ -1624,6 +1625,13 @@ static int block(struct wfn *w, unsigned long ms)
     struct wfn_fetch *f;
     unsigned long t = now(w);
     int n = 0;
+    /* progress() takes what TLS holds already, so after it the bytes a
+     * connection still holds are bytes it cannot take now (its fetch's ring is
+     * full until the caller reads, or not a whole record yet): waiting on them
+     * would spin until the wait is over. Only when progress() stopped at its
+     * round limit is there more to do at once. */
+    if (w->more)
+        return 0;
     for (f = w->fetches; f; f = f->next)
         if (f->state != F_DONE && f->state != F_WS) {
             unsigned long left = (long)(f->deadline - t) > 0 ? f->deadline - t : 0;
@@ -1634,8 +1642,6 @@ static int block(struct wfn *w, unsigned long ms)
         unsigned char m = 0;
         if (c->state == C_DEAD)
             continue;
-        if (c->tls && c->state != C_TLS && c->state != C_CONNECT && w->io.tls_pending(w->io.env, c->tls) > 0)
-            return 0;
         if (c->state == C_CONNECT)
             m = WFN_WANT_WRITE;
         else if (c->state == C_TLS)

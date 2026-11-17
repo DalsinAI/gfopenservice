@@ -1789,6 +1789,26 @@ func main() {
 else:
     print("Go's HTTP/2 server: skipped, no Go here")
 
+# A fetch whose ring is full leaves bytes TLS has already read that the transport cannot take until the
+# caller reads them: a wait for another fetch must then sleep on the sockets, not spin asking for those bytes
+# (on the Amiga it held the CPU for each wait, about 1 s for each image Aminet's front page asked for).
+P = Fetcher(window=16384)
+big = P.open(f"GET {sbase}/big\n")
+P.head(big)
+slow = P.open(f"GET {sbase}/slow\n")
+c0, t0 = time.thread_time(), time.time()
+hd = P.head(slow, wait=1000, limit=10)
+cpu, wall = time.thread_time() - c0, time.time() - t0
+assert hd["status"] == 200 and wall > 2, (hd, wall)
+assert cpu < wall / 4, f"waited {wall:.2f} s for a head, {cpu:.2f} s of it on the CPU"
+body, _ = P.read_all(big)
+assert body == BIG
+P.close(big)
+P.close(slow)
+assert P.stats()[0] == 0, P.stats()
+P.free()
+print(f"a wait beside a full TLS fetch sleeps: {wall:.1f} s waited, {cpu:.2f} s on the CPU, the big body intact")
+
 assert F.stats()[0] == 0, F.stats()
 F.free()
 D.free()
