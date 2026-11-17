@@ -3,7 +3,8 @@
  * HEIC/HEIF through libheif, camera RAW and anything else ImageMagick reads
  * through those tools (media_tool.c), answered as 32-bit ARGB scaled to fit;
  * with MD_AV, JPEG, PNG, GIF, WebP, JPEG XL, PSD, EXR... and sounds, videos,
- * MIDI and SID tunes through FFmpeg (media_av.c).
+ * and SID tunes through FFmpeg (media_av.c). MIDI is refused: the Amiga's
+ * own synth plays it (gfopenmidi.datatype, gfopensynth.library).
  * MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #include "media_decode.h"
@@ -286,7 +287,7 @@ static int load(const struct md_buffer *file, const char *hint, uint32_t frame, 
 }
 
 #ifdef MD_AV
-/* A MIDI or SID tune: rendered to WAV on the host, then answered as any sound. */
+/* A SID tune: rendered to WAV on the host, then answered as any sound. */
 static int tune(uint16_t op, uint32_t kind, uint32_t arg, const uint32_t extra[4], struct md_buffer buf[4],
                 uint32_t *result, uint32_t *aux)
 {
@@ -352,7 +353,11 @@ static int call_one(uint16_t op, uint32_t arg, const uint32_t extra[4], struct m
     if (op == MD_VCLOSE)
         return md_video_close(arg);
     if ((op == MD_PROBE || op == MD_DECODE) && buf[0].in && buf[0].length) {
-        uint32_t kind = md_tune_sniff(buf[0].in, buf[0].length);
+        uint32_t kind;
+        /* MIDI is not the host's to play: the Amiga's own synth does (gfopenmidi.datatype). */
+        if (md_is_midi(buf[0].in, buf[0].length))
+            return MD_BADREQUEST;
+        kind = md_tune_sniff(buf[0].in, buf[0].length);
         if (kind)
             return tune(op, kind, arg, extra, buf, result, aux);
         /* Not a picture: a sound through FFmpeg. */

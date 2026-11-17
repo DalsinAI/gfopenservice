@@ -33,7 +33,7 @@ The Cradle-side services hand work to libraries and tools installed on the
 host, each under its own licence:
 
 - **OpenSSL 3** (`opentls.key/1`, and the `opentls` provider through AmiSSL 5 on the Amiga).
-- **libavif**, **libheif** with libde265, **FFmpeg**, **ImageMagick**, **LibRaw**, **librsvg** and **cairo**, **FluidSynth** and **sidplayfp** (`media.decode/1`, `media.cdxl/1`).
+- **libavif**, **libheif** with libde265, **FFmpeg**, **ImageMagick**, **LibRaw**, **librsvg** and **cairo**, and **sidplayfp** (`media.decode/1`, `media.cdxl/1`).
 - **LibreOffice** or **Apache OpenOffice**, **poppler**, **Ghostscript** and **pandoc** (`doc.render/1`).
 - **zlib**, linked from the host system.
 

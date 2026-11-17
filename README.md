@@ -41,7 +41,7 @@ Programs ask by name and do not know where the work runs:
 | `src/wfnet*.c`, `include/openweb/wfnet.h` | The native transport of `openweb.fetch`: HTTP/1.1, HTTP/2 (our own HPACK), WebSocket, proxies and HTTP auth over the Amiga's bsdsocket.library and gfopentls.library, when no card or Cradle offers it; gzip, deflate and Brotli bodies undone by the datatypes (`src/wfnet_dec.c`: stream.datatype's gzip.datatype and brotli.datatype through datatypes.library); portable C, tested on Linux through `host/wfnet_posix.c` |
 | `src/owfetch.c` | `OWFetch`: fetches a URL through `openweb.fetch/1`, prints the status and headers, writes the body |
 | `host/openweb_fetch.c` | `openweb.fetch/1` on the host: HTTP and HTTPS fetches with OpenSSL 3, zlib and Brotli, many at once, each with its own handle (docs/OPENWEB_FETCH.md) |
-| `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, FluidSynth, sidplayfp) and the services' result cache |
+| `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, sidplayfp) and the services' result cache |
 | `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c`, `host/media_svg.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD, SVG drawn at any size and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for gfopenimage's datatypes (docs/MEDIA_DECODE.md); WebM frames by packet in webm.datatype's own colours |
 | `host/media_native.c`, `host/build_native.sh` | `media.decode/1`'s NDECODE: the Amiga's own PNG, TGA, GIF and WebP decoders, built for the host from the gfopendatatypes checkout, so the services card gives the 68k's pixels byte for byte |
 | `host/blob.c` | Files sent once: kept on the host by handle for `media.decode/1` and `doc.render/1` |
@@ -121,7 +121,7 @@ NDECODE is built in when the gfopendatatypes checkout (`ODT`) and its
 `tarballs/libwebp-1.6.0.tar.gz` are there (`host/build_native.sh`).
 The rest of `media.decode/1`'s formats need tools at run time only:
 `imagemagick` for PSD, XCF, TGA and other pictures, `libraw-bin` for camera
-RAW, `fluidsynth` with `fluid-soundfont-gm` for MIDI, `sidplayfp` for
+RAW, `sidplayfp` for
 SID tunes, and `librsvg2-2` (on most desktops already) for SVG; a missing tool just means that format is refused.
 `doc.render/1` runs LibreOffice (`libreoffice-writer`, `-calc`,
 `-impress`), or Apache OpenOffice 4 (with its `pyuno` part) when that is

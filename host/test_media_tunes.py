@@ -1,6 +1,8 @@
-"""Checks media.decode/1's tunes: MIDI through FluidSynth, SID through
+"""Checks media.decode/1's tunes: SID through
 sidplayfp and tracker modules through FFmpeg's libopenmpt, each answered
-as 16-bit PCM like any other sound. The files are made here, byte by byte.
+as 16-bit PCM like any other sound, and that a MIDI file is refused (the
+Amiga's own synth plays MIDI: gfopenmidi.datatype). The files are made here,
+byte by byte.
 MIT, Copyright (c) 2026 AmiCradle Team."""
 import os
 import struct
@@ -59,8 +61,7 @@ with tempfile.TemporaryDirectory(dir="/var/tmp") as tmp:
     os.environ["OPENSERVICE_CACHE"] = os.path.join(tmp, "cache")
     os.environ["OPENSERVICE_SIDSECONDS"] = "3"
     import media_decode as md
-    for name, data, fmt, least in (("tune.mid", midi(), b"MIDI", 1.4), ("tune.sid", sid(), b"SID ", 2.9),
-                                   ("tune.mod", mod(), b"MOD ", 1.0)):
+    for name, data, fmt, least in (("tune.sid", sid(), b"SID ", 2.9), ("tune.mod", mod(), b"MOD ", 1.0)):
         t = time.perf_counter()
         st, frames, rate, out = call(PROBE, data, room=24)
         first = time.perf_counter() - t
@@ -77,5 +78,9 @@ with tempfile.TemporaryDirectory(dir="/var/tmp") as tmp:
         assert peak > 1000, (name, peak)
         print(f"{name}: {fmt.decode()} {nframes / orate:.1f} s at {orate} Hz x{ochan}, peak {peak}; "
               f"first probe {first:.2f} s, decode after {again:.2f} s")
-    assert call(PROBE, b"MThd" + bytes(20), room=24)[0] == -2
-    print("bad tune refused")
+    # MIDI is not the host's to play: a good file, one in a RIFF wrapper and a broken one are all refused
+    rmid = b"RIFF" + struct.pack("<I", len(midi()) + 12) + b"RMID" + b"data" + struct.pack("<I", len(midi())) + midi()
+    for name, data in (("tune.mid", midi()), ("tune.rmi", rmid), ("a broken MIDI", b"MThd" + bytes(20))):
+        for op in (PROBE, DECODE):
+            assert call(op, data, room=4096)[0] == -2, (name, op)
+    print("MIDI refused: probe and decode, plain, RIFF and broken")

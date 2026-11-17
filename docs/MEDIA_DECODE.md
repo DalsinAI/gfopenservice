@@ -10,7 +10,7 @@ Vorbis, Opus, MP3, AAC, ALAC, WMA, tracker modules through libopenmpt, and
 more) and any video it reads (H.264, HEVC, AV1, VP8/VP9, MPEG-4, MPEG-1/2,
 WMV, MJPEG, Theora); and `host/media_tool.c` for what host tools do better:
 camera RAW (LibRaw's `dcraw_emu`, else `dcraw`), the other raster
-pictures ImageMagick reads (PSD, XCF, TGA, PCX, ...), MIDI (FluidSynth) and
+pictures ImageMagick reads (PSD, XCF, TGA, PCX, ...) and
 SID tunes (sidplayfp). ImageMagick is always told the format
 (`PNG:in.png[0]`): known by the file's signature, or for TGA, PICT, WBMP
 and XBM, which have none, by the hint. It never picks a reader from the
@@ -99,10 +99,10 @@ applied; in AVIF files not yet.
 
 A file that is not one of the pictures above and that FFmpeg recognises is
 taken as a sound (its best audio stream). MIDI files (`MThd`, or RIFF
-`RMID`) are played through FluidSynth with `$OPENSERVICE_SOUNDFONT`, else
-the General MIDI font in `/usr/share/sounds/sf2`; SID tunes (`PSID`,
+`RMID`) are refused (bad request): MIDI is played on the Amiga itself by
+`gfopenmidi.datatype` through `gfopensynth.library`, our own synth; SID tunes (`PSID`,
 `RSID`) through sidplayfp for `$OPENSERVICE_SIDSECONDS` (default 60), as
-SID tunes never end. Both are rendered once to a WAV in the cache
+SID tunes never end. A SID tune is rendered once to a WAV in the cache
 (`.../sound`), then answered as below.
 
 | Op | Request | Answer |
@@ -112,7 +112,7 @@ SID tunes never end. Both are rendered once to a WAV in the cache
 
 PROBE's info for a sound: kind (3 sound), format (`'FLAC'`, `'VORB'`,
 `'OPUS'`, `'MP3 '`, `'AAC '`, `'ALAC'`, `'WMA '`, `'MOD '` for tracker
-modules, `'GME '` for console tunes through Game Music Emu, `'MIDI'`,
+modules, `'GME '` for console tunes through Game Music Emu,
 `'SID '`, or `'SOUN'` for another),
 flags (0), sample frames, rate, channels.
 
