@@ -1809,6 +1809,20 @@ assert P.stats()[0] == 0, P.stats()
 P.free()
 print(f"a wait beside a full TLS fetch sleeps: {wall:.1f} s waited, {cpu:.2f} s on the CPU, the big body intact")
 
+# TLS sessions are kept per host and offered to the next connection's handshake: a resumed handshake has
+# no certificate chain and no signature to check, most of a full one's time on a 68040.
+R = Fetcher()
+hd1, b1, _ = R.fetch(f"{sbase}/closing")
+hd2, b2, _ = R.fetch(f"{sbase}/closing")
+hd3, b3, _ = R.fetch(f"https://127.0.0.1:{HTTPS}/closing")
+assert b1 == b2 == b3 == b"bye", (b1, b2, b3)
+assert "resumed=no" in hd1["info"] and "verified=yes" in hd1["info"], hd1["info"]
+assert "resumed=yes" in hd2["info"] and "verified=yes" in hd2["info"], hd2["info"]
+assert "resumed=no" in hd3["info"], hd3["info"]                 # another host name: its own session
+assert R.stats()[0] == 0, R.stats()
+R.free()
+print("TLS sessions: the second connection to a host resumes, another host name does not")
+
 assert F.stats()[0] == 0, F.stats()
 F.free()
 D.free()
