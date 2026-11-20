@@ -17,7 +17,7 @@
 
 #include <stdint.h>
 
-#define ACM_PROTO_VERSION 1
+#define ACM_PROTO_VERSION 2
 #define ACM_MSG_MAX 65536
 #define ACM_MAX_STREAMS 16
 #define ACM_MAX_TAGS 96
@@ -43,7 +43,7 @@
 /* Requests (broker to worker) */
 enum {
     ACM_Q_HELLO = 1,    /* acm_hello; answer ACM_A_OK with acm_ready */
-    ACM_Q_SOURCE,       /* one fd (read-only); acm_source */
+    ACM_Q_SOURCE,       /* one fd; acm_source (regular read-only, or FEED stream) */
     ACM_Q_PROBE,        /* answer ACM_A_INFO */
     ACM_Q_OPEN,         /* acm_open; answer ACM_A_OPENED */
     ACM_Q_POOL,         /* one fd (the sealed memfd); acm_pool */
@@ -88,7 +88,15 @@ struct acm_ready {
 #define ACM_SB_NNP      4u
 #define ACM_SB_RLIMIT   8u
 
-struct acm_source { uint64_t size; uint32_t flags, pad; };
+/* SOURCE is either a seekable read-only file or the consumer end of a
+ * bounded FEED socket.  The latter is blocking while OPEN discovers the
+ * format; the worker changes only its own socket end to nonblocking after
+ * OPEN, so an empty live feed answers NEXT with AGAIN rather than tripping
+ * the watchdog. */
+#define ACM_SOURCE_FEED 1u
+/* base/size select a bounded byte view of a regular source.  A zero size
+ * means the complete file (base must then be zero).  FEED has neither. */
+struct acm_source { uint64_t base, size; uint32_t flags, pad; };
 
 /* Decode paths, per stream (ACM_INFO's "path in use") */
 #define ACM_PATH_NONE        0

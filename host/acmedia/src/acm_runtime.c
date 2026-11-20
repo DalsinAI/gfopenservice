@@ -33,8 +33,13 @@
  *   - ACM_FRAME gives YUV420 (planar: Y at pitch, then U and V at pitch / 2)
  *     at the decoded size; other formats or sizes are ACM_E_FORMAT (the
  *     conversions and scaling are stage c).
- *   - sources: whatever the runtime's source hook opens (ACM_SRC_ACFS);
- *     ACM_FEED is ACM_E_BADARG (no feed session in the core).
+ *   - sources: ACFS from the runtime's read-only fd; CD from a bounded,
+ *     relative 2048-byte LBA view of that instance's image; and unseekable
+ *     FEED through a bounded socket queue. ACM_FEED is a nonblocking
+ *     producer: short writes are back-pressure and accepted EOF half-closes
+ *     the queue. A known seekable source no larger than the queue cap posts
+ *     one NEED and is exposed only after its fixed memfd view is complete;
+ *     larger/unknown/sparse read-at remains deliberately NOTAVAIL.
  *   - CONTROL: PLAY, PAUSE, STOP (paused at the start), SEEK, RATE (1/16 to
  *     16), VOLUME (kept), SETRECT, EVENTS; SELECT and TARGET are ACM_E_BADARG.
  *
@@ -57,6 +62,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "acm_broker.h"
 #include "acm_codecs.h"
@@ -75,6 +82,9 @@ uint32_t acm_tag_parse(const char *s);
 #define RT_AUDIO_AHEAD_MS 500         /* bound a buffering guest ahead of due video */
 #define RT_NEXT_MS 10000              /* the watchdog on one frame */
 #define RT_ASK_MS 2000
+#define RT_FEED_OPEN_MS 120000         /* a producer may need several writes before format discovery */
+#define RT_FEED_QUEUE (256u << 10)     /* design's advised upper chunk; kernel may round this */
+#define RT_SEEK_FEED_MAX RT_FEED_QUEUE /* first bounded NEED slice: one fixed request, never host-OOM */
 #define RT_POOL_MAX (768ull << 20)     /* the worker uses the same total cap */
 #define RT_POOL_SLOTS_MAX 256u
 #define RT_DIM_MAX 16384u
@@ -104,6 +114,11 @@ struct sess {
     struct rt *rt;
     uint32_t slot, handle;
     int fd;
+    int feed_fd;
+    int feed, feed_eof;
+    int feed_seekable, feed_ready;
+    uint32_t feed_at, feed_size;
+    uint64_t source_base, source_size;
     uint32_t streams, vkind, akind, flags;
     struct acv_rect rect;
     pthread_t th;
@@ -143,6 +158,7 @@ struct probe {
     uint32_t gen;
     int32_t err;
     int fd;
+    uint64_t source_base, source_size;
     uint64_t done_ns;
     struct acm_info info;
     struct rt *rt;
@@ -173,10 +189,14 @@ static void note_why(const struct acm_worker *w) {
     pthread_mutex_unlock(&R.mu);
 }
 
-static int spawn(struct acm_worker *w, int fd) {
+static int spawn(struct acm_worker *w, int fd, uint32_t source_flags, uint64_t source_base, uint64_t source_size) {
     int r = acm_spawn(w, R.worker, R.hw, R.hw ? 4096 : 1536, !getenv("ACM_VERBOSE"), &R.hello);
     if (r) { note_why(w); return r; }
-    if (fd >= 0 && (r = acm_give_source(w, fd))) { note_why(w); acm_end(w); return r; }
+    if (fd >= 0) {
+        r = source_size ? acm_give_source_view(w, fd, source_base, source_size) :
+                          acm_give_source_flags(w, fd, source_flags);
+        if (r) { note_why(w); acm_end(w); return r; }
+    }
     return 0;
 }
 
@@ -199,7 +219,7 @@ static void *caps_main(void *a) {
     struct acm_worker w;
     struct acm_caps c;
     memset(&c, 0, sizeof c);
-    if (!spawn(&w, -1)) {
+    if (!spawn(&w, -1, 0, 0, 0)) {
         uint32_t t, len;
         static uint8_t buf[sizeof(struct acm_caps) + 64];
         if (!acm_ask(&w, ACM_Q_CAPS, NULL, 0, NULL, 0, &t, buf, sizeof buf, &len, NULL, NULL, 10000) && t == ACM_A_CAPS && len >= sizeof c)
@@ -272,7 +292,7 @@ static void *probe_main(void *a) {
     struct acm_worker w;
     struct acm_info info;
     memset(&info, 0, sizeof info);
-    int r = spawn(&w, p->fd);
+    int r = spawn(&w, p->fd, 0, p->source_base, p->source_size);
     if (!r) {
         uint32_t t, len;
         static __thread uint8_t buf[sizeof(struct acm_info) + 256];
@@ -293,6 +313,16 @@ static void *probe_main(void *a) {
 
 static int32_t be_probe(void *ctx, const uint8_t *src, uint32_t srclen, uint8_t *out, uint32_t len) {
     (void)ctx; (void)out; (void)len;
+    if (srclen < 4) return ACM_E_BADARG;
+    uint32_t kind = rd(src);
+    /* FEED has no session handle through which PROBE could receive bytes. */
+    if (kind == ACMG_SRC_FEED) return ACM_E_NOTAVAIL;
+    uint64_t source_base = 0, source_size = 0;
+    if (kind == ACMG_SRC_CD) {
+        if (srclen != 16 || !rd(src + 4) || rd(src + 4) > 99 || rd(src + 8) > rd(src + 12)) return ACM_E_BADARG;
+        source_base = (uint64_t)rd(src + 8) * 2048u;
+        source_size = ((uint64_t)rd(src + 12) - rd(src + 8) + 1u) * 2048u;
+    } else if (kind != ACMG_SRC_ACFS) return ACM_E_BADARG;
     int fd = -1;
     int32_t r = R.host->source ? R.host->source(src, srclen, &fd) : ACM_E_IO;
     if (r) return r;
@@ -308,6 +338,7 @@ static int32_t be_probe(void *ctx, const uint8_t *src, uint32_t srclen, uint8_t 
     R.probe_gen = (R.probe_gen + 1) & 0x7fffffu; if (!R.probe_gen) R.probe_gen = 1;
     memset(p, 0, sizeof *p);
     p->used = 1; p->gen = R.probe_gen; p->fd = fd;
+    p->source_base = source_base; p->source_size = source_size;
     uint32_t ticket = p->gen << 8 | (uint32_t)(p - R.probes + 1);
     pthread_mutex_unlock(&R.mu);
     pthread_t th;
@@ -392,7 +423,8 @@ static void plane_events(struct sess *s, int ms) {
 }
 
 static int sess_open(struct sess *s) {
-    int r = spawn(&s->w, s->fd);
+    int r = spawn(&s->w, s->fd, s->feed ? ACM_SOURCE_FEED : 0, s->source_base, s->source_size);
+    if (s->fd >= 0) { close(s->fd); s->fd = -1; }
     if (r) return r;
     struct acm_open o = {
         (s->streams & ACMG_ST_VIDEO) && s->vkind != ACMG_OUT_NONE ? -1 : -2,
@@ -401,7 +433,8 @@ static int sess_open(struct sess *s) {
     };
     uint32_t t, len;
     static __thread uint8_t buf[sizeof(struct acm_opened) + 256];
-    r = acm_ask(&s->w, ACM_Q_OPEN, &o, sizeof o, NULL, 0, &t, buf, sizeof buf, &len, NULL, NULL, 15000);
+    r = acm_ask(&s->w, ACM_Q_OPEN, &o, sizeof o, NULL, 0, &t, buf, sizeof buf, &len, NULL, NULL,
+                s->feed ? RT_FEED_OPEN_MS : 15000);
     if (!r && (t != ACM_A_OPENED || len < sizeof(struct acm_opened))) r = acm_err(t, buf, ACM_E_FORMAT);
     if (r) { note_why(&s->w); return r; }
     pthread_mutex_lock(&s->mu);
@@ -678,6 +711,13 @@ static void step(struct sess *s) {
 
 static void *sess_main(void *a) {
     struct sess *s = a;
+    if (s->feed_seekable) {
+        pthread_mutex_lock(&s->mu);
+        while (!s->closing && !s->feed_ready) pthread_cond_wait(&s->cv, &s->mu);
+        int closing = s->closing;
+        pthread_mutex_unlock(&s->mu);
+        if (closing) goto done;
+    }
     int r = sess_open(s);
     if (r) {
         set_state(s, ACM_STATE_ERROR, r);
@@ -711,11 +751,13 @@ static void *sess_main(void *a) {
         if (playing) step(s);
         else plane_events(s, 0);
     }
+done:
     if (s->plane) acm_plane_close(&s->pl, &s->w, 500);
     drop_next(s);
     drop_ready(s);
     acm_end(&s->w);
     if (s->fd >= 0) close(s->fd);
+    if (s->feed_fd >= 0) close(s->feed_fd);
     pthread_mutex_destroy(&s->mu);
     pthread_cond_destroy(&s->cv);
     free(s);
@@ -736,6 +778,16 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
                        const uint8_t *video, const uint8_t *audio, uint32_t port, uint32_t flags) {
     (void)ctx; (void)port;
     if (!slot || slot > ACM_SVC_SESSIONS) return ACM_E_BADARG;
+    if (srclen < 4) return ACM_E_BADARG;
+    uint32_t source_kind = rd(src);
+    if (source_kind == ACMG_SRC_FEED) {
+        if (srclen != 12 || (rd(src + 8) & ~ACMG_SF_SEEKABLE)) return ACM_E_BADARG;
+        /* This first NEED slice pre-fills one known, bounded view.  Unknown
+         * or larger sources need the later sparse/random read-at protocol. */
+        if ((rd(src + 8) & ACMG_SF_SEEKABLE) && (!rd(src + 4) || rd(src + 4) > RT_SEEK_FEED_MAX)) return ACM_E_NOTAVAIL;
+    } else if (source_kind == ACMG_SRC_CD) {
+        if (srclen != 16 || !rd(src + 4) || rd(src + 4) > 99 || rd(src + 8) > rd(src + 12)) return ACM_E_BADARG;
+    } else if (source_kind != ACMG_SRC_ACFS) return ACM_E_BADARG;
     if (!(streams & (ACMG_ST_VIDEO | ACMG_ST_AUDIO)) || (streams & ~(ACMG_ST_VIDEO | ACMG_ST_AUDIO))) return ACM_E_FORMAT;
     uint32_t vk = video ? rd(video) : ACMG_OUT_NONE;
     uint32_t ak = audio ? rd(audio) : ACMG_OUT_NONE;
@@ -744,7 +796,16 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     if (ak != ACMG_OUT_NONE && ak != ACMG_OUT_GUEST) return ak == ACMG_OUT_ACAHI ? ACM_E_FORMAT : ACM_E_BADARG;
     struct sess *s = calloc(1, sizeof *s);
     if (!s) return ACM_E_LIMIT;
-    s->rt = &R; s->slot = slot; s->handle = handle; s->streams = streams; s->vkind = vk; s->akind = ak; s->flags = flags; s->fd = -1;
+    s->rt = &R; s->slot = slot; s->handle = handle; s->streams = streams; s->vkind = vk; s->akind = ak; s->flags = flags;
+    s->fd = s->feed_fd = -1; s->w.sock = s->w.pool_fd = -1; s->feed = source_kind == ACMG_SRC_FEED;
+    if (s->feed && (rd(src + 8) & ACMG_SF_SEEKABLE)) {
+        s->feed_seekable = 1; s->feed_size = rd(src + 4);
+        s->source_size = s->feed_size;
+    }
+    if (source_kind == ACMG_SRC_CD) {
+        s->source_base = (uint64_t)rd(src + 8) * 2048u;
+        s->source_size = ((uint64_t)rd(src + 12) - rd(src + 8) + 1u) * 2048u;
+    }
     s->rate = 65536; s->volume = 65536; s->state = ACM_STATE_OPENING;
     s->evmask = flags & ACMG_OF_EVENTS_FRAME ? ACMG_EVM(ACMG_EV_FRAME) : 0;
     s->rect.space = ACV_SPACE_RTG; s->rect.visible = 1;
@@ -754,10 +815,38 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     }
     int32_t r = R.host->source ? R.host->source(src, srclen, &s->fd) : ACM_E_IO;
     if (r) { free(s); return r; }
+    if (s->feed) {
+        int resolved = s->fd, sv[2];
+        s->fd = -1;
+        if (s->feed_seekable) {
+            struct stat st;
+            char p[64];
+            snprintf(p, sizeof p, "/proc/self/fd/%d", resolved);
+            if (fstat(resolved, &st) || !S_ISREG(st.st_mode) || st.st_size != 0 ||
+                ftruncate(resolved, s->feed_size) ||
+                fcntl(resolved, F_ADD_SEALS, F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) < 0 ||
+                (s->fd = open(p, O_RDONLY | O_CLOEXEC)) < 0) {
+                close(resolved); free(s); return ACM_E_LIMIT;
+            }
+            s->feed_fd = resolved;
+        } else if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv)) {
+            close(resolved); free(s); return ACM_E_LIMIT;
+        } else {
+            close(resolved);                 /* #161's anonymous admission fd; the bounded queue is the worker source */
+            int fl = fcntl(sv[0], F_GETFL);
+            if (fl < 0 || fcntl(sv[0], F_SETFL, fl | O_NONBLOCK) < 0) {
+                close(sv[0]); close(sv[1]); free(s); return ACM_E_LIMIT;
+            }
+            int q = RT_FEED_QUEUE;
+            (void)setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &q, sizeof q);
+            s->feed_fd = sv[0];              /* nonblocking producer: ACM_FEED */
+            s->fd = sv[1];                   /* blocking consumer: worker OPEN */
+        }
+    }
     pthread_mutex_init(&s->mu, NULL);
     pthread_cond_init(&s->cv, NULL);
     pthread_mutex_lock(&R.mu);
-    if (R.slots[slot]) { pthread_mutex_unlock(&R.mu); close(s->fd); free(s); return ACM_E_BADARG; }
+    if (R.slots[slot]) { pthread_mutex_unlock(&R.mu); close(s->fd); if (s->feed_fd >= 0) close(s->feed_fd); free(s); return ACM_E_BADARG; }
     R.slots[slot] = s;
     pthread_mutex_unlock(&R.mu);
     pthread_attr_t at;
@@ -767,9 +856,10 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     pthread_attr_destroy(&at);
     if (e) {
         pthread_mutex_lock(&R.mu); R.slots[slot] = NULL; pthread_mutex_unlock(&R.mu);
-        close(s->fd); free(s);
+        close(s->fd); if (s->feed_fd >= 0) close(s->feed_fd); free(s);
         return ACM_E_LIMIT;
     }
+    if (s->feed_seekable) post(handle, ACMG_EV_NEED, 0, s->feed_size);
     return ACM_PENDING;
 }
 
@@ -783,6 +873,7 @@ static void be_close(void *ctx, uint32_t slot) {
     if (!s) return;
     pthread_mutex_lock(&s->mu);
     s->closing = 1;
+    if (s->feed_fd >= 0) shutdown(s->feed_fd, SHUT_RDWR); /* wake an OPEN waiting for producer bytes */
     pthread_cond_signal(&s->cv);
     pthread_mutex_unlock(&s->mu);
 }
@@ -945,8 +1036,46 @@ static int32_t be_audio(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, ui
     return r;
 }
 static int32_t be_feed(void *ctx, uint32_t slot, const uint8_t *in, uint32_t len, uint32_t flags) {
-    (void)ctx; (void)in; (void)len; (void)flags;
-    return get(slot) ? ACM_E_BADARG : ACM_E_NOSUCH;              /* no feed sessions in the core */
+    (void)ctx;
+    struct sess *s = get(slot);
+    if (!s) return ACM_E_NOSUCH;
+    if ((flags & ~ACMG_FF_EOF) || (!in && len)) return ACM_E_BADARG;
+    pthread_mutex_lock(&s->mu);
+    int32_t r;
+    if (!s->feed) r = ACM_E_BADARG;
+    else if (s->feed_eof) r = ACM_E_EOF;
+    else if (s->feed_seekable) {
+        uint32_t left = s->feed_size - s->feed_at;
+        uint32_t take = len < left ? len : left;
+        ssize_t n;
+        do n = take ? pwrite(s->feed_fd, in, take, (off_t)s->feed_at) : 0;
+        while (n < 0 && errno == EINTR);
+        if (n < 0) r = ACM_E_IO;
+        else {
+            s->feed_at += (uint32_t)n;
+            r = (int32_t)n;
+            if (s->feed_at == s->feed_size) {
+                s->feed_ready = s->feed_eof = 1;
+                pthread_cond_signal(&s->cv);
+            }
+        }
+    }
+    else {
+        ssize_t n = len ? send(s->feed_fd, in, len, MSG_DONTWAIT | MSG_NOSIGNAL) : 0;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) n = 0;
+        if (n < 0) r = errno == EPIPE || errno == ECONNRESET ? ACM_E_DECODER : ACM_E_IO;
+        else {
+            r = (int32_t)n;
+            /* EOF belongs to this write only when every byte was accepted;
+             * a short write is resubmitted by the guest. */
+            if ((flags & ACMG_FF_EOF) && (uint32_t)n == len) {
+                shutdown(s->feed_fd, SHUT_WR);
+                s->feed_eof = 1;
+            }
+        }
+    }
+    pthread_mutex_unlock(&s->mu);
+    return r;
 }
 
 static int32_t be_fault(void *ctx, int32_t code, uint8_t *out, uint32_t len) {

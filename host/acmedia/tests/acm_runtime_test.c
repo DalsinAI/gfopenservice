@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -73,13 +74,28 @@ static int count_ev(uint32_t h, uint32_t type, int from) {
 }
 static int nev_now(void) { pthread_mutex_lock(&emu); int n = nev; pthread_mutex_unlock(&emu); return n; }
 
-static char dir[64], real_dir[4096];
+static char dir[64], real_dir[4096], cd_path[4096];
 static int real_mode;
 static int sources;
-/* ACM_SRC_ACFS, unit 0: a file in dir */
+/* ACFS is a file in dir. FEED matches gfosmotherboards #161's admission
+ * contract: a private anonymous read/write fd, which libacmedia turns into
+ * its bounded worker queue without exposing a path. */
 static int32_t host_source(const uint8_t *src, uint32_t n, int *fd) {
     *fd = -1;
-    if (n < 9 || rd(src) != 1) return ACM_E_BADARG;
+    if (n == 12 && rd(src) == ACMG_SRC_FEED) {
+        *fd = memfd_create("acmedia-feed-test", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+        sources++;
+        return *fd < 0 ? ACM_E_IO : 0;
+    }
+    if (n == 16 && rd(src) == ACMG_SRC_CD) {
+        char p[4096];
+        if (cd_path[0]) snprintf(p, sizeof p, "%s", cd_path);
+        else snprintf(p, sizeof p, "%s/cd.fake", dir);
+        *fd = open(p, O_RDONLY | O_CLOEXEC);
+        sources++;
+        return *fd < 0 ? ACM_E_IO : 0;
+    }
+    if (n < 9 || rd(src) != ACMG_SRC_ACFS) return ACM_E_BADARG;
     char p[4096];
     const char *base = real_mode ? real_dir : dir;
     size_t bl = strlen(base), nl = strnlen((const char *)src + 8, n - 8);
@@ -97,9 +113,24 @@ static uint32_t srcd(uint8_t *d, const char *name) {
     memcpy(d + 8, name, l);
     return (uint32_t)(8 + l);
 }
+static uint32_t feedd(uint8_t *d, uint32_t hint, uint32_t flags) {
+    be(d, ACMG_SRC_FEED); be(d + 4, hint); be(d + 8, flags); return 12;
+}
+static uint32_t cdd(uint8_t *d, uint32_t track, uint32_t first, uint32_t last) {
+    be(d, ACMG_SRC_CD); be(d + 4, track); be(d + 8, first); be(d + 12, last); return 16;
+}
 static void file(const char *name, const char *text) {
     char p[256]; snprintf(p, sizeof p, "%s/%s", dir, name);
     FILE *f = fopen(p, "w"); fputs(text, f); fclose(f);
+}
+static void cd_file(const char *line) {
+    char p[256]; snprintf(p, sizeof p, "%s/cd.fake", dir);
+    FILE *f = fopen(p, "wb");
+    uint8_t zero[2048] = { 0 };
+    fwrite(zero, 1, sizeof zero, f);
+    fwrite(line, 1, strlen(line), f);
+    fwrite(zero, 1, sizeof zero - strlen(line), f);
+    fclose(f);
 }
 
 /* ---- a stand-in acscreen: each frame shown at once, the one before DONE; STATE off on demand ---- */
@@ -251,6 +282,172 @@ static int real_file(const char *libpath, const char *worker, const char *clip) 
     return 0;
 }
 
+/* A real demux through an inclusive CD LBA view.  The image has one sector
+ * of junk before the clip and another after the selected view: OPEN proves
+ * that neither the demuxer nor its seeks escape that view. */
+static int real_cd_file(const char *libpath, const char *worker, const char *clip) {
+    FILE *in = fopen(clip, "rb");
+    if (!in) { perror(clip); return 1; }
+    char tmp[] = "/tmp/acmedia-cd-XXXXXX";
+    int fd = mkstemp(tmp);
+    if (fd < 0) { fclose(in); perror("mkstemp"); return 1; }
+    FILE *out = fdopen(fd, "wb");
+    uint8_t sector[2048]; memset(sector, 0xa5, sizeof sector);
+    if (!out || fwrite(sector, 1, sizeof sector, out) != sizeof sector) { fclose(in); if (out) fclose(out); else close(fd); unlink(tmp); return 1; }
+    uint64_t bytes = 0; size_t got;
+    while ((got = fread(sector, 1, sizeof sector, in)) != 0) {
+        if (fwrite(sector, 1, got, out) != got) { fclose(in); fclose(out); unlink(tmp); return 1; }
+        bytes += got;
+    }
+    fclose(in);
+    if (!bytes) { fclose(out); unlink(tmp); return 1; }
+    uint32_t sectors = (uint32_t)((bytes + 2047u) / 2048u);
+    size_t pad = (size_t)((uint64_t)sectors * 2048u - bytes);
+    memset(sector, 0, sizeof sector);
+    if ((pad && fwrite(sector, 1, pad, out) != pad) || fwrite(sector, 1, sizeof sector, out) != sizeof sector || fclose(out)) {
+        unlink(tmp); return 1;
+    }
+    snprintf(cd_path, sizeof cd_path, "%s", tmp);
+    setenv("AC_ACMEDIA_WORKER", worker, 1);
+    setenv("AC_ACMEDIA_HW", "0", 1);
+    unsetenv("AC_ACMEDIA_DENY"); unsetenv("AC_ACMEDIA_HWONLY");
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
+    acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
+    if (!entry || !(B = entry(&host))) { unlink(tmp); return 1; }
+    uint8_t d[16], vt[32] = { 0 }, info[4096];
+    be(vt, ACMG_OUT_GUEST); cdd(d, 1, 1, sectors);
+    uint32_t h = 0x1cd; int from = nev_now(); struct ev e;
+    int32_t r = B->open(B->ctx, 1, h, d, sizeof d, ACMG_ST_VIDEO, vt, NULL, 0, ACMG_OF_EVENTS_FRAME);
+    if (r != ACM_PENDING || wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0 || B->info(B->ctx, 1, info, sizeof info) < 0) {
+        fprintf(stderr, "real-cd: OPEN failed (%d)\n", r); unlink(tmp); return 1;
+    }
+    uint32_t wh = rd(info + 4 * ACM_IH_SIZE), w = wh >> 16, hgt = wh & 0xffff;
+    uint32_t a4[4] = { 0, 0, 0, 0 };
+    if (!w || !hgt || B->control(B->ctx, 1, ACMG_CTL_PLAY, a4) || wait_ev(h, ACMG_EV_FRAME, &from, 5000, &e) < 0) {
+        fprintf(stderr, "real-cd: no video event\n"); B->close(B->ctx, 1); unlink(tmp); return 1;
+    }
+    size_t cap = (size_t)w * hgt * 2u;
+    uint8_t *frame = malloc(cap);
+    int32_t pts = frame ? B->frame(B->ctx, 1, frame, (uint32_t)cap, w, ACMG_PIX_YUV420, w, hgt) : ACM_E_LIMIT;
+    free(frame); B->close(B->ctx, 1); unlink(tmp); cd_path[0] = 0;
+    if (pts < 0) { fprintf(stderr, "real-cd: frame failed (%d)\n", pts); return 1; }
+    printf("acm_runtime_real_cd: PASS lba=1-%u bytes=%llu video=%ux%u pts=%d\n",
+           sectors, (unsigned long long)bytes, w, hgt, pts);
+    return 0;
+}
+
+/* The same checked-in A/V clip, but with no source path or file fd in the
+ * worker.  The caller feeds 64 KiB chunks through the public backend, obeys
+ * every short write, sends EOF, then proves the real demuxer/decoder opened. */
+static int real_feed_file(const char *libpath, const char *worker, const char *clip) {
+    FILE *f = fopen(clip, "rb");
+    if (!f) { perror(clip); return 1; }
+    if (fseek(f, 0, SEEK_END) || ftell(f) < 0) { fclose(f); return 1; }
+    long size = ftell(f);
+    rewind(f);
+    setenv("AC_ACMEDIA_WORKER", worker, 1);
+    setenv("AC_ACMEDIA_HW", "0", 1);
+    unsetenv("AC_ACMEDIA_DENY");
+    unsetenv("AC_ACMEDIA_HWONLY");
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
+    acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
+    if (!entry || !(B = entry(&host))) { fprintf(stderr, "real-feed: libacmedia unavailable: %s\n", dlerror()); fclose(f); return 1; }
+    uint8_t d[12], vt[32] = { 0 }, at[32] = { 0 }, chunk[4096], info[4096];
+    be(vt, ACMG_OUT_GUEST); be(at, ACMG_OUT_GUEST);
+    uint32_t h = 0x101, n = feedd(d, size > 0xffffffffL ? 0 : (uint32_t)size, 0);
+    int from = nev_now(); struct ev e;
+    int32_t r = B->open(B->ctx, 1, h, d, n, ACMG_ST_VIDEO | ACMG_ST_AUDIO, vt, at, 0, ACMG_OF_EVENTS_FRAME);
+    if (r != ACM_PENDING) { fprintf(stderr, "real-feed: OPEN failed (%d)\n", r); fclose(f); return 1; }
+    size_t total = 0; unsigned shorts = 0;
+    int opened_while_feeding = 0, playing = 0;
+    uint32_t a4[4] = { 0, 0, 0, 0 };
+    for (;;) {
+        size_t got = fread(chunk, 1, sizeof chunk, f);
+        size_t atp = 0;
+        while (atp < got) {
+            int32_t took = B->feed(B->ctx, 1, chunk + atp, (uint32_t)(got - atp), 0);
+            if (took < 0) { fprintf(stderr, "real-feed: FEED failed (%d)\n", took); fclose(f); return 1; }
+            if (!took) { usleep(1000); continue; }
+            if ((size_t)took < got - atp) shorts++;
+            atp += (size_t)took; total += (size_t)took;
+        }
+        usleep(1000);                    /* a live producer, not a whole-file burst */
+        if (!opened_while_feeding && wait_ev(h, ACMG_EV_OPENED, &from, 0, &e) >= 0) {
+            opened_while_feeding = 1;
+            if (B->control(B->ctx, 1, ACMG_CTL_PLAY, a4)) { fprintf(stderr, "real-feed: early PLAY failed\n"); fclose(f); return 1; }
+            playing = 1;
+            /* Deliberately leave the live queue empty once. NEXT must answer
+             * AGAIN and survive until the next producer write. */
+            usleep(20000);
+            if (B->info(B->ctx, 1, info, sizeof info) < 0 || rd(info + 4 * ACM_IH_STATE) == ACM_STATE_ERROR) {
+                fprintf(stderr, "real-feed: empty live queue became an error\n"); fclose(f); return 1;
+            }
+        }
+        if (got < sizeof chunk) {
+            if (ferror(f)) { perror("real-feed fread"); fclose(f); return 1; }
+            break;
+        }
+    }
+    fclose(f);
+    if (B->feed(B->ctx, 1, NULL, 0, ACMG_FF_EOF) != 0 ||
+        (!opened_while_feeding && wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0)) {
+        fprintf(stderr, "real-feed: EOF/OPENED failed\n"); return 1;
+    }
+    r = B->info(B->ctx, 1, info, sizeof info);
+    uint32_t ai = rd(info + 4 * ACM_IH_AUDIO);
+    if (r < 0 || rd(info + 4 * ACM_IH_VIDEO) == 0xffffffffu) {
+        fprintf(stderr, "real-feed: INFO has no video stream (%d)\n", r); return 1;
+    }
+    if ((!playing && B->control(B->ctx, 1, ACMG_CTL_PLAY, a4)) || wait_ev(h, ACMG_EV_FRAME, &from, 5000, &e) < 0) {
+        B->info(B->ctx, 1, info, sizeof info);
+        fprintf(stderr, "real-feed: no decoded video (state=%u err=%d ERROR=%d END=%d)\n",
+                rd(info + 4 * ACM_IH_STATE), (int32_t)rd(info + 4 * ACM_IH_ERROR),
+                count_ev(h, ACMG_EV_ERROR, 0), count_ev(h, ACMG_EV_END, 0));
+        return 1;
+    }
+    B->close(B->ctx, 1);
+    printf("acm_runtime_real_feed: PASS bytes=%zu short_writes=%u live_open=%d video_event=1 audio=%s\n",
+           total, shorts, opened_while_feeding, ai == 0xffffffffu ? "none" : "yes");
+    return total != (size_t)size;
+}
+
+/* Known-size seekable FEED: NEED asks for the one bounded view, short guest
+ * writes fill it, and the worker starts only after the range is complete. */
+static int real_seek_feed_file(const char *libpath, const char *worker, const char *clip) {
+    FILE *f = fopen(clip, "rb");
+    if (!f || fseek(f, 0, SEEK_END) || ftell(f) <= 0 || ftell(f) > (256 << 10)) { if (f) fclose(f); return 1; }
+    long size = ftell(f); rewind(f);
+    uint8_t *data = malloc((size_t)size);
+    if (!data || fread(data, 1, (size_t)size, f) != (size_t)size) { free(data); fclose(f); return 1; }
+    fclose(f);
+    setenv("AC_ACMEDIA_WORKER", worker, 1); setenv("AC_ACMEDIA_HW", "0", 1);
+    unsetenv("AC_ACMEDIA_DENY"); unsetenv("AC_ACMEDIA_HWONLY");
+    void *lib = dlopen(libpath, RTLD_NOW | RTLD_LOCAL);
+    acm_backend_entry entry = lib ? (acm_backend_entry)dlsym(lib, "acmedia_backend_v1") : NULL;
+    if (!entry || !(B = entry(&host))) { free(data); return 1; }
+    uint8_t d[12], vt[32] = { 0 }; be(vt, ACMG_OUT_GUEST);
+    feedd(d, (uint32_t)size, ACMG_SF_SEEKABLE);
+    uint32_t h = 0x15e; int from = nev_now(); struct ev e;
+    int32_t r = B->open(B->ctx, 1, h, d, sizeof d, ACMG_ST_VIDEO, vt, NULL, 0, ACMG_OF_EVENTS_FRAME);
+    if (r != ACM_PENDING || wait_ev(h, ACMG_EV_NEED, &from, 1000, &e) < 0 || e.a != 0 || e.b != (uint32_t)size) {
+        free(data); return 1;
+    }
+    size_t at = 0; unsigned writes = 0;
+    while (at < (size_t)size) {
+        uint32_t ask = (uint32_t)((size_t)size - at > 4096 ? 4096 : (size_t)size - at);
+        int32_t took = B->feed(B->ctx, 1, data + at, ask, 0);
+        if (took <= 0) { free(data); return 1; }
+        at += (size_t)took; writes++;
+    }
+    free(data);
+    if (wait_ev(h, ACMG_EV_OPENED, &from, 15000, &e) < 0) return 1;
+    uint32_t a4[4] = { 0, 0, 0, 0 };
+    if (B->control(B->ctx, 1, ACMG_CTL_PLAY, a4) || wait_ev(h, ACMG_EV_FRAME, &from, 5000, &e) < 0) return 1;
+    B->close(B->ctx, 1);
+    printf("acm_runtime_real_seek_feed: PASS bytes=%ld writes=%u need=0/%ld video_event=1\n", size, writes, size);
+    return 0;
+}
+
 /* The review stress case through the public backend: consume audio as fast
  * as offered while video stays on its real-time clock. Read-ahead must be
  * back-pressured, not overflow the worker's crossed-video queue. */
@@ -311,9 +508,12 @@ static int real_flow(const char *libpath, const char *worker, const char *clip, 
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: acm_runtime_test LIBACMEDIA WORKER [--real FILE | --real-cd FILE | --real-feed FILE | --real-seek-feed FILE | --real-flow[-paced|-unread] FILE FRAMES SAMPLES]\n"); return 2; }
     signal(SIGPIPE, SIG_IGN);
     if (argc == 5 && !strcmp(argv[3], "--real")) return real_file(argv[1], argv[2], argv[4]);
+    if (argc == 5 && !strcmp(argv[3], "--real-cd")) return real_cd_file(argv[1], argv[2], argv[4]);
+    if (argc == 5 && !strcmp(argv[3], "--real-feed")) return real_feed_file(argv[1], argv[2], argv[4]);
+    if (argc == 5 && !strcmp(argv[3], "--real-seek-feed")) return real_seek_feed_file(argv[1], argv[2], argv[4]);
     if (argc == 7 && !strcmp(argv[3], "--real-flow"))
         return real_flow(argv[1], argv[2], argv[4], atoi(argv[5]), atoi(argv[6]), 0, 0);
     if (argc == 7 && !strcmp(argv[3], "--real-flow-paced"))
@@ -346,7 +546,7 @@ int main(int argc, char **argv) {
     acm_host bad = host; bad.abi = 99;
     CHECK(entry(&bad) == NULL, "a host of another ABI: none");
     B = entry(&host);
-    CHECK(B && B->abi == ACM_SVC_ABI && B->caps && B->probe && B->result && B->open && B->info && B->control && B->frame && B->close && B->fault,
+    CHECK(B && B->abi == ACM_SVC_ABI && B->caps && B->probe && B->result && B->open && B->info && B->control && B->frame && B->feed && B->close && B->fault,
           "the backend, whole");
     if (!B) return 1;
 
@@ -385,6 +585,7 @@ int main(int argc, char **argv) {
     file("bad-offset.fake", "FAKE 64 48 2 25 bad=offset\n");
     file("bad-height.fake", "FAKE 64 48 2 25 bad=height\n");
     file("bad-pool.fake", "FAKE 64 48 2 25 bad=pool\n");
+    cd_file("FAKE 40 24 3 25\n");
     uint8_t d[256], out[4096];
     int from = 0;
     struct ev e;
@@ -404,6 +605,84 @@ int main(int argc, char **argv) {
           "PROBE of something else: RESULT ACM_E_FORMAT");
     CHECK(B->probe(B->ctx, d, srcd(d, "missing.fake"), out, sizeof out) == ACM_E_IO, "PROBE of a missing file: ACM_E_IO at once");
     CHECK(B->result(B->ctx, 0x12345, out, sizeof out) == ACM_E_NOSUCH && B->result(B->ctx, 0, out, sizeof out) == ACM_E_NOSUCH, "RESULT of no ticket: ACM_E_NOSUCH");
+
+    /* FEED: OPEN starts the worker against a bounded socket queue. The
+     * producer call never waits for the decoder; it accepts a prefix, then
+     * zero when full. EOF is final only when the complete write fit. */
+    be(gtarget, ACMG_OUT_GUEST);
+    uint32_t fn = feedd(d, 0, 0);
+    CHECK(B->probe(B->ctx, d, fn, out, sizeof out) == ACM_E_NOTAVAIL,
+          "a FEED probe has no session to feed: ACM_E_NOTAVAIL");
+    feedd(d, 0, ACMG_SF_SEEKABLE);
+    CHECK(B->open(B->ctx, 1, 0x501, d, 12, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_NOTAVAIL,
+          "an unknown-size seekable FEED is not silently treated as a FIFO");
+    cdd(d, 0, 1, 1);
+    CHECK(B->open(B->ctx, 1, 0x501, d, 16, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_BADARG,
+          "CD rejects track zero");
+    cdd(d, 1, 2, 1);
+    CHECK(B->open(B->ctx, 1, 0x501, d, 16, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_E_BADARG,
+          "CD rejects a reversed LBA view");
+    cdd(d, 1, 1, 1);
+    from = nev_now();
+    tk = B->probe(B->ctx, d, 16, out, sizeof out);
+    CHECK(tk > 0 && wait_ev(0, ACMG_EV_PROBED, &from, 5000, &e) >= 0 &&
+          B->result(B->ctx, (uint32_t)tk, out, sizeof out) > 0 && rd(out + 4 * ACM_IH_SIZE) == 0,
+          "CD probe reads only the selected LBA view");
+    from = nev_now();
+    CHECK(B->open(B->ctx, 1, 0x4cd, d, 16, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_PENDING &&
+          wait_ev(0x4cd, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
+          "CD opens through its bounded LBA view");
+    B->close(B->ctx, 1);
+
+    static const uint8_t seekline[] = "FAKE 48 32 4 25\n";
+    feedd(d, sizeof seekline - 1, ACMG_SF_SEEKABLE);
+    from = nev_now();
+    CHECK(B->open(B->ctx, 1, 0x5ee, d, 12, ACMG_ST_VIDEO, gtarget, NULL, 0, 0) == ACM_PENDING &&
+          wait_ev(0x5ee, ACMG_EV_NEED, &from, 1000, &e) >= 0 && e.a == 0 && e.b == sizeof seekline - 1,
+          "known bounded seekable FEED posts NEED(0,size)");
+    CHECK(B->feed(B->ctx, 1, seekline, 5, 0) == 5 &&
+          wait_ev(0x5ee, ACMG_EV_OPENED, &from, 0, &e) < 0,
+          "seekable FEED does not expose a partial view to the worker");
+    CHECK(B->feed(B->ctx, 1, seekline + 5, sizeof seekline - 1 - 5, 0) == (int32_t)sizeof seekline - 1 - 5 &&
+          wait_ev(0x5ee, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
+          "the complete requested view starts the worker");
+    CHECK(B->feed(B->ctx, 1, seekline, 1, 0) == ACM_E_EOF,
+          "seekable FEED rejects bytes beyond the requested view");
+    B->close(B->ctx, 1);
+
+    fn = feedd(d, 0, 0);
+    from = nev_now();
+    uint32_t fh = 0x501;
+    r = B->open(B->ctx, 1, fh, d, fn, ACMG_ST_VIDEO, gtarget, NULL, 0, 0);
+    CHECK(r == ACM_PENDING && B->feed(B->ctx, 1, (const uint8_t *)"x", 1, 2) == ACM_E_BADARG,
+          "FEED opens pending and refuses unknown flags");
+    static const uint8_t fline[] = "FAKE 64 48 4 25\n";
+    CHECK(B->feed(B->ctx, 1, fline, sizeof fline - 1, 0) == (int32_t)sizeof fline - 1 &&
+          wait_ev(fh, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
+          "FEED bytes start the worker and produce OPENED");
+    uint8_t *burstbuf = malloc(1u << 20);
+    memset(burstbuf, 0xa5, 1u << 20);
+    int32_t first = B->feed(B->ctx, 1, burstbuf, 1u << 20, ACMG_FF_EOF);
+    int32_t second = B->feed(B->ctx, 1, burstbuf, 1u << 20, 0);
+    CHECK(first > 0 && first < (1 << 20) && second == 0,
+          "FEED queue applies short-write backpressure (%d then %d)", first, second);
+    CHECK(B->feed(B->ctx, 1, NULL, 0, ACMG_FF_EOF) == 0,
+          "zero-byte EOF is accepted after a short data+EOF write");
+    CHECK(B->feed(B->ctx, 1, fline, sizeof fline - 1, 0) == ACM_E_EOF,
+          "FEED rejects bytes after accepted EOF");
+    free(burstbuf);
+    B->close(B->ctx, 1);
+
+    fn = feedd(d, sizeof fline - 1, 0);
+    from = nev_now(); fh = 0x601;
+    r = B->open(B->ctx, 1, fh, d, fn, ACMG_ST_VIDEO, gtarget, NULL, 0, 0);
+    CHECK(r == ACM_PENDING && B->feed(B->ctx, 1, fline, sizeof fline - 1, ACMG_FF_EOF) == (int32_t)sizeof fline - 1 &&
+          wait_ev(fh, ACMG_EV_OPENED, &from, 5000, &e) >= 0,
+          "a complete data+EOF write opens a FEED session");
+    uint32_t fa[4] = { 0, 0, 0, 0 };
+    CHECK(B->control(B->ctx, 1, ACMG_CTL_PLAY, fa) == 0 && wait_ev(fh, ACMG_EV_END, &from, 3000, &e) >= 0,
+          "an EOF feed drains to END");
+    B->close(B->ctx, 1);
 
     /* OPEN to GUEST, the frames */
     be(gtarget, ACMG_OUT_GUEST);

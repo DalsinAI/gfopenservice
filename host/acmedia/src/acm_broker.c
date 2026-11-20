@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -138,16 +139,41 @@ int acm_spawn(struct acm_worker *w, const char *exe, int hw, unsigned mem_mb, in
     return 0;
 }
 
-int acm_give_source(struct acm_worker *w, int fd)
+static int give_source(struct acm_worker *w, int fd, uint32_t flags, uint64_t base, uint64_t size)
 {
     int fl = fcntl(fd, F_GETFL);
-    if (fl < 0 || (fl & O_ACCMODE) != O_RDONLY) return ACM_E_BADARG;
-    struct acm_source s = { 0, 0, 0 };
+    if (fl < 0 || (flags & ~ACM_SOURCE_FEED) ||
+        (!(flags & ACM_SOURCE_FEED) && (fl & O_ACCMODE) != O_RDONLY) ||
+        ((flags & ACM_SOURCE_FEED) && (base || size)) || (!size && base))
+        return ACM_E_BADARG;
+    if (size) {
+        struct stat st;
+        if (fstat(fd, &st) || !S_ISREG(st.st_mode) || base > (uint64_t)st.st_size ||
+            size > (uint64_t)st.st_size - base)
+            return ACM_E_BADARG;
+    }
+    struct acm_source s = { base, size, flags, 0 };
     uint32_t t, len;
     uint8_t buf[256];
     int r = acm_ask(w, ACM_Q_SOURCE, &s, sizeof s, &fd, 1, &t, buf, sizeof buf, &len, NULL, NULL, 2000);
     if (r) return r;
     return t == ACM_A_OK ? 0 : acm_err(t, buf, ACM_E_BADARG);
+}
+
+int acm_give_source_flags(struct acm_worker *w, int fd, uint32_t flags)
+{
+    return give_source(w, fd, flags, 0, 0);
+}
+
+int acm_give_source_view(struct acm_worker *w, int fd, uint64_t base, uint64_t size)
+{
+    if (!size) return ACM_E_BADARG;
+    return give_source(w, fd, 0, base, size);
+}
+
+int acm_give_source(struct acm_worker *w, int fd)
+{
+    return acm_give_source_flags(w, fd, 0);
 }
 
 int acm_give_pool(struct acm_worker *w, uint32_t slot_size, uint32_t nslots)

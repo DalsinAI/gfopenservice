@@ -69,6 +69,8 @@ static uint32_t hw_paths;
 /* the source */
 static int src_fd = -1;
 static int64_t src_size = -1;
+static int64_t src_base, src_pos;
+static int src_feed;
 static AVIOContext *avio;
 static AVFormatContext *fmt;
 
@@ -125,17 +127,31 @@ static void reply_ok(const void *p, uint32_t n) { acm_send(sock, ACM_A_OK, p, n,
 static int src_read(void *o, uint8_t *buf, int n)
 {
     (void)o;
+    if (src_size >= 0) {
+        if (src_pos >= src_size) return AVERROR_EOF;
+        int64_t left = src_size - src_pos;
+        if ((int64_t)n > left) n = (int)left;
+    }
     ssize_t r;
     do r = read(src_fd, buf, (size_t)n); while (r < 0 && errno == EINTR);
-    if (r < 0) return AVERROR(EIO);
+    if (r < 0) return errno == EAGAIN || errno == EWOULDBLOCK ? AVERROR(EAGAIN) : AVERROR(EIO);
+    if (r > 0 && src_size >= 0) src_pos += r;
     return r == 0 ? AVERROR_EOF : (int)r;
 }
 static int64_t src_seek(void *o, int64_t off, int whence)
 {
     (void)o;
     if (whence == AVSEEK_SIZE) return src_size >= 0 ? src_size : AVERROR(ENOSYS);
-    off_t r = lseek(src_fd, (off_t)off, whence & ~AVSEEK_FORCE);
-    return r < 0 ? AVERROR(errno) : (int64_t)r;
+    if (src_size < 0) return AVERROR(ENOSYS);
+    int w = whence & ~AVSEEK_FORCE;
+    int64_t from = w == SEEK_SET ? 0 : w == SEEK_CUR ? src_pos : w == SEEK_END ? src_size : -1;
+    if (from < 0) return AVERROR(EINVAL);
+    __int128 at = (__int128)from + off;
+    if (at < 0 || at > src_size) return AVERROR(EINVAL);
+    off_t r = lseek(src_fd, (off_t)(src_base + (int64_t)at), SEEK_SET);
+    if (r < 0) return AVERROR(errno);
+    src_pos = (int64_t)at;
+    return src_pos;
 }
 
 /* ---- policy ---- */
@@ -211,7 +227,11 @@ static int open_demuxer(void)
     if (!fmt) return ACM_E_LIMIT;
     fmt->pb = avio;
     fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
-    fmt->probesize = 8 << 20;
+    /* A finite file can spend up to 8 MiB identifying odd containers. A
+     * live FEED must finish discovery without waiting for EOF; 64 KiB is the
+     * design's minimum advised producer chunk and enough for stream headers. */
+    fmt->probesize = src_feed ? 64 << 10 : 8 << 20;
+    if (src_feed) fmt->max_analyze_duration = 500000; /* 0.5 s of timestamps, not the stream's EOF */
     if (avformat_open_input(&fmt, NULL, NULL, NULL) < 0) { fmt = NULL; return ACM_E_FORMAT; }
     if (avformat_find_stream_info(fmt, NULL) < 0) return ACM_E_FORMAT;
     return 0;
@@ -461,18 +481,21 @@ static int feed(struct dec *want)
     }
     AVPacket *pkt = av_packet_alloc();
     if (!pkt) return ACM_E_LIMIT;
-    int r = 0;
+    int r = 0, invalid = 0;
     for (;;) {
         if ((want == &V && apqn == AUDIO_PACKET_QUEUE) || (want == &A && vqn == VIDEO_PACKET_QUEUE)) {
             r = ACM_E_AGAIN;
             break;
         }
         int e = av_read_frame(fmt, pkt);
+        if (e == AVERROR(EAGAIN)) { r = ACM_E_AGAIN; break; }
         if (e == AVERROR_EOF || (e < 0 && avio_feof(fmt->pb))) {
             if (!want->drained) { avcodec_send_packet(want->c, NULL); want->drained = 1; }
             break;
         }
+        if (e == AVERROR_INVALIDDATA && invalid++ < 32) continue;
         if (e < 0) { r = ACM_E_IO; break; }
+        invalid = 0;
         struct dec *to = pkt->stream_index == V.idx && V.c ? &V : pkt->stream_index == A.idx && A.c ? &A : NULL;
         if (to) {
             if (to != want) {
@@ -644,6 +667,18 @@ static void do_open(const struct acm_open *o)
         op.sample_rate = a_rate;
         op.channels = a_ch;
         if ((uint32_t)A.idx < op.info.nstreams) op.info.s[A.idx].channels = a_ch;
+    }
+    /* OPEN may block while a streamed source supplies enough bytes for
+     * probing.  Once it is ready, an empty queue is ordinary back-pressure,
+     * not a reason to hold NEXT until the broker watchdog kills us. */
+    if (src_feed) {
+        int fl = fcntl(src_fd, F_GETFL);
+        if (fl < 0 || fcntl(src_fd, F_SETFL, fl | O_NONBLOCK) < 0) {
+            close_dec(&V); close_dec(&A);
+            reply_error(ACM_E_IO, 0, "feed nonblocking");
+            return;
+        }
+        fmt->flags |= AVFMT_FLAG_NONBLOCK;
     }
     acm_send(sock, ACM_A_OPENED, &op, sizeof op, NULL, 0, NULL, 0);
 }
@@ -969,11 +1004,29 @@ int main(int argc, char **argv)
         case ACM_Q_SOURCE: {
             NEED(struct acm_source);
             if (fd < 0 || src_fd >= 0) { if (fd >= 0) close(fd); reply_error(ACM_E_BADARG, 0, "source"); break; }
+            const struct acm_source *source = (const void *)rx;
             int fl = fcntl(fd, F_GETFL);
-            if (fl < 0 || (fl & O_ACCMODE) != O_RDONLY) { close(fd); reply_error(ACM_E_BADARG, 0, "source must be read only"); break; }
-            src_fd = fd;
+            if (fl < 0 || (source->flags & ~ACM_SOURCE_FEED) ||
+                (!(source->flags & ACM_SOURCE_FEED) && (fl & O_ACCMODE) != O_RDONLY) ||
+                ((source->flags & ACM_SOURCE_FEED) && (source->base || source->size)) ||
+                (!source->size && source->base)) {
+                close(fd); reply_error(ACM_E_BADARG, 0, "source access"); break;
+            }
             struct stat st;
-            src_size = (!fstat(fd, &st) && S_ISREG(st.st_mode)) ? (int64_t)st.st_size : -1;
+            int regular = !fstat(fd, &st) && S_ISREG(st.st_mode);
+            if (source->size && (!regular || source->base > (uint64_t)st.st_size ||
+                source->size > (uint64_t)st.st_size - source->base ||
+                source->base > INT64_MAX || source->size > INT64_MAX)) {
+                close(fd); reply_error(ACM_E_BADARG, 0, "source view"); break;
+            }
+            src_fd = fd;
+            src_feed = !!(source->flags & ACM_SOURCE_FEED);
+            src_base = source->size ? (int64_t)source->base : 0;
+            src_size = src_feed ? -1 : source->size ? (int64_t)source->size : regular ? (int64_t)st.st_size : -1;
+            src_pos = 0;
+            if (src_base && lseek(src_fd, (off_t)src_base, SEEK_SET) < 0) {
+                close(src_fd); src_fd = -1; reply_error(ACM_E_BADARG, 0, "source view seek"); break;
+            }
             reply_ok(NULL, 0);
             break;
         }

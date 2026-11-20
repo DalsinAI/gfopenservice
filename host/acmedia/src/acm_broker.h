@@ -39,6 +39,12 @@ int acm_ask(struct acm_worker *w, uint32_t type, const void *p, uint32_t n, cons
 int acm_give_pool(struct acm_worker *w, uint32_t slot_size, uint32_t nslots);
 /* A read-only source fd for the worker. */
 int acm_give_source(struct acm_worker *w, int fd);
+/* As above, or ACM_SOURCE_FEED for a connected stream socket.  The original
+ * entry point remains the regular-file API used by the harness. */
+int acm_give_source_flags(struct acm_worker *w, int fd, uint32_t flags);
+/* A regular source restricted to [base, base + size).  size must be nonzero;
+ * the worker reports offsets and seeks relative to the view. */
+int acm_give_source_view(struct acm_worker *w, int fd, uint64_t base, uint64_t size);
 void acm_end(struct acm_worker *w);                 /* CLOSE, else kill; always reaps */
 /* The answer of an ACM_A_ERROR, or code when it was something else */
 int acm_err(uint32_t rtype, const void *rbuf, int code);

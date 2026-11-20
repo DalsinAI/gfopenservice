@@ -59,6 +59,18 @@ and the event queue; the backend gets host pointers and posts events.
   opened beneath the unit's share), answer at once, and start a thread that
   runs the worker; PROBED, OPENED or ERROR follows. Nothing waits for a
   decoder on the emulation thread.
+- An unseekable `ACM_SRC_FEED` becomes a private 256 KiB-class socket queue.
+  `ACM_FEED` sends without waiting, returns the accepted prefix when the
+  queue is full, and half-closes it only when a complete EOF write was
+  accepted. The worker may wait for format bytes during OPEN; after OPEN it
+  reads nonblocking so an empty live queue is `ACM_E_AGAIN`, not a watchdog
+  failure. A CD source is restricted to its descriptor's inclusive
+  first/last 2048-byte LBA range; reads, size queries and seeks are relative
+  to that worker view and cannot reach bytes outside it. A seekable FEED with
+  a known size up to 256 KiB posts `NEED(0,size)`, fills a fixed memfd view,
+  and starts the worker only after the complete request. Unknown, larger and
+  sparse/random seekable feeds remain explicit `ACM_E_NOTAVAIL` until the
+  full read-at protocol lands.
 - ACM_CONTROL queues PLAY, PAUSE, STOP, SEEK, RATE, SETRECT for the session's
   thread; EVENTS and VOLUME are kept. Frames are paced by their pts from the
   moment PLAY lands.
@@ -79,7 +91,7 @@ and the event queue; the backend gets host pointers and posts events.
   audio that continues beyond video EOF, while an unread tail is abandoned
   after a bounded grace so END cannot hang. Pulling audio ahead queues crossed
   video packets with bounded back-pressure instead of dropping them. Direct ACAHI output is not claimed
-  by this step. Feeds, the CD, SELECT and TARGET are not in this step.
+  by this step. Seekable feeds, the CD, SELECT and TARGET are not in this step.
 - The policy: `AC_ACMEDIA_DENY`, `AC_ACMEDIA_HWONLY` (tags, comma separated),
   `AC_ACMEDIA_HW=0`. CAPS reports it, and the host's hardware decoders once a
   worker has said what they are.
@@ -94,6 +106,24 @@ checked-in H.264/AAC clip:
 
     build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
         build/$(uname -m)/acmedia-worker-system --real "$PWD/tests/clips/h264-av.mp4"
+
+The real unseekable-FEED receipt sends a streamable Matroska clip in 64 KiB
+chunks through `ACM_FEED`, sends EOF, and proves a decoded frame event:
+
+    build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
+        build/$(uname -m)/acmedia-worker-system --real-feed "$PWD/tests/clips/h264-small.mkv"
+
+The CD receipt wraps the same real clip with junk sectors on both sides and
+opens only the declared inclusive LBA view:
+
+    build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
+        build/$(uname -m)/acmedia-worker-system --real-cd "$PWD/tests/clips/h264-av.mp4"
+
+The first seekable receipt proves the bounded `NEED` prefill using short
+writes and a real Matroska demux:
+
+    build/$(uname -m)/acm_runtime_test build/$(uname -m)/libacmedia.so \
+        build/$(uname -m)/acmedia-worker-system --real-seek-feed "$PWD/tests/clips/h264-small.mkv"
 
 `acm_test avflow FILE` first counts each stream alone, then verifies the exact
 same frame/sample counts when video and audio alternately fill the bounded
@@ -120,8 +150,9 @@ socketpair on fd 3, an empty environment and stdin on /dev/null. In order:
 3. The broker reads `/proc/PID/status` (`Seccomp: 2`, `NoNewPrivs: 1`) and
    refuses a worker that is not locked down before it sends anything.
 
-The source arrives as one read-only fd. FFmpeg reads it through our own
-AVIOContext: no protocol is compiled in, `file` included.
+The source arrives as one read-only fd, or as the consumer end of a bounded
+FEED socket. FFmpeg reads it through our own AVIOContext: no protocol is
+compiled in, `file` included.
 
 Software decoders decode straight into the frame pool, a sealed memfd the
 broker makes, so a frame is not copied between processes (`ACM_FF_COPIED`

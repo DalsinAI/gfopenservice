@@ -20,6 +20,8 @@
 
 /* the source descriptor's kinds */
 enum { ACMG_SRC_ACFS = 1, ACMG_SRC_FEED = 2, ACMG_SRC_CD = 3 };
+#define ACMG_SF_SEEKABLE 1u
+#define ACMG_FF_EOF 1u
 /* ACM_OPEN 2: the streams wanted */
 #define ACMG_ST_VIDEO 1u
 #define ACMG_ST_AUDIO 2u
