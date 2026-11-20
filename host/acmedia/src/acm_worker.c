@@ -632,7 +632,7 @@ static void do_open(const struct acm_open *o)
         op.vpath = V.path;
     }
     if (A.c) {
-        a_rate = (uint32_t)A.c->sample_rate;
+        a_rate = o->flags & ACM_OF_AUDIO_44100 ? 44100u : (uint32_t)A.c->sample_rate;
         a_ch = 2;                                             /* ACM_PCM_S16BE_STEREO at the guest ABI */
         AVChannelLayout out = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
         if (swr_alloc_set_opts2(&swr, &out, AV_SAMPLE_FMT_S16, (int)a_rate, &A.c->ch_layout, A.c->sample_fmt,

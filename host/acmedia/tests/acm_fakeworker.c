@@ -32,6 +32,7 @@
 
 static int sock = 3, srcfd = -1;
 static uint32_t W, H, N, fps, tag = ACM_T_H264, crash_at, hang_at, nslots = 4, has_audio, audio_samples, force_soft;
+static uint32_t out_rate = 8000;
 static uint8_t *pool; static uint32_t slot_size; static int given[64];
 static uint32_t k, ak;                               /* the next video/audio data */
 static char bad[16];
@@ -78,11 +79,11 @@ static void fill(uint8_t *b, uint32_t f) {
 static void next(uint32_t want) {
     if (!opened) { err(ACM_E_BADARG, "nothing open"); return; }
     if (want & ACM_WANT_AUDIO) {
-        uint32_t total = audio_samples ? audio_samples : N * 8000 / fps;
+        uint32_t total = audio_samples ? audio_samples : N * out_rate / fps;
         if (!has_audio || ak >= total) { err(ACM_E_EOF, "audio end"); return; }
         uint32_t frames = total - ak < 128 ? total - ak : 128;
         uint8_t b[sizeof(struct acm_audio) + 512];
-        struct acm_audio a = { (int64_t)ak * 1000 / 8000, frames, 8000, 2, 0 };
+        struct acm_audio a = { (int64_t)ak * 1000 / out_rate, frames, out_rate, 2, 0 };
         memcpy(b, &a, sizeof a);
         int16_t *pcm = (int16_t *)(void *)(b + sizeof a);
         for (uint32_t i = 0; i < frames; i++) pcm[2 * i] = pcm[2 * i + 1] = (int16_t)((ak + i) & 0x7fff);
@@ -150,7 +151,7 @@ int main(int argc, char **argv) {
             op.apath = op.audio >= 0 ? ACM_PATH_SW : ACM_PATH_NONE;
             op.width = W; op.height = H; op.pixfmt = ACM_PIX_YUV420P;
             op.slot_size = (W * H * 3 / 2 + 4095) & ~4095u; op.nslots = op.video < 0 ? 0 : nslots;
-            if (op.audio >= 0) { op.sample_rate = 8000; op.channels = 2; }
+            if (op.audio >= 0) { out_rate = o->flags & ACM_OF_AUDIO_44100 ? 44100 : 8000; op.sample_rate = out_rate; op.channels = 2; }
             if (!strcmp(bad, "pool")) { op.slot_size = 0x40000000u; op.nslots = 2; }
             op.info = info;
             opened = op.video >= 0 || op.audio >= 0;
@@ -179,7 +180,7 @@ int main(int argc, char **argv) {
             int64_t ms = ((const struct acm_seek *)rx)->ms;
             uint32_t f = (uint32_t)(ms * fps / 1000);
             if (f >= N) { err(ACM_E_EOF, "past the end"); break; }
-            k = f; ak = (uint32_t)(ms * 8); ok(NULL, 0);
+            k = f; ak = (uint32_t)(ms * out_rate / 1000); ok(NULL, 0);
             break;
         }
         case ACM_Q_CAPS: {
