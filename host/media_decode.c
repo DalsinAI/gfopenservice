@@ -359,7 +359,7 @@ static int call_one(uint16_t op, uint32_t arg, const uint32_t extra[4], struct m
         if (!sniff(buf[0].in, buf[0].length) && !md_is_raw(buf[0].in, buf[0].length, hint)
             && md_is_av(buf[0].in, buf[0].length) == MD_AV_MEDIA) {
             if (op == MD_DECODE)
-                return buf[1].out ? md_sound_decode(&buf[0], arg, extra, &buf[1], result, aux) : MD_TOOSMALL;
+                return buf[1].out ? md_sound_decode_stream(&buf[0], arg, extra, &buf[1], result, aux) : MD_TOOSMALL;
             if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
                 return MD_TOOSMALL;
             if ((st = md_sound_probe(&buf[0], extra, buf[1].out, result, aux)) == MD_OK)

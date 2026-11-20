@@ -22,6 +22,10 @@ int md_sound_probe(const struct md_buffer *file, const uint32_t extra[4], uint8_
                    uint32_t *result, uint32_t *aux);
 int md_sound_decode(const struct md_buffer *file, uint32_t first, const uint32_t extra[4], struct md_buffer *out,
                     uint32_t *result, uint32_t *aux);
+/* DECODE for a reader going through a file a piece at a time: the file's
+ * decoder stays open from one piece to the next (media_av.c's streams). */
+int md_sound_decode_stream(const struct md_buffer *file, uint32_t first, const uint32_t extra[4],
+                           struct md_buffer *out, uint32_t *result, uint32_t *aux);
 
 /* Video: VOPEN keeps the file and answers info, result the handle, aux
  * frames a second x 1000; VFRAME (extra[0] the frame, extra[1] 0 for 8-bit
