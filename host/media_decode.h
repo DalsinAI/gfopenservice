@@ -70,7 +70,6 @@
 #define MD_FORMAT_ORA    0x4f524120u /* 'ORA ': OpenRaster's flattened picture */
 #define MD_FORMAT_KRA    0x4b524120u /* 'KRA ': Krita's */
 #define MD_FORMAT_CBZ    0x43425a20u /* 'CBZ ': a comic book's first page */
-#define MD_FORMAT_MIDI   0x4d494449u /* 'MIDI', rendered by FluidSynth */
 #define MD_FORMAT_SID    0x53494420u /* 'SID ', rendered by sidplayfp */
 #define MD_FORMAT_MODULE 0x4d4f4420u /* 'MOD ': tracker modules, through libopenmpt */
 #define MD_FORMAT_CHIPTUNE 0x474d4520u /* 'GME ': NSF, SPC, VGM... through Game Music Emu */

@@ -400,33 +400,20 @@ int md_tool_picture(const uint8_t *d, uint32_t n, const char *hint, int raw, uin
 
 /* ---- tunes --------------------------------------------------------------- */
 
-uint32_t md_tune_sniff(const uint8_t *d, uint32_t n)
+int md_is_midi(const uint8_t *d, uint32_t n)
 {
-    /* A standard MIDI file: a six-byte header, format 0 to 2, a track, then MTrk. */
+    /* A standard MIDI file: a six-byte header, format 0 to 2, a track, then MTrk; or one in a RIFF wrapper. */
     if (n >= 22 && !memcmp(d, "MThd", 4) && !memcmp(d + 4, "\0\0\0\6", 4) && d[8] == 0 && d[9] <= 2
         && (d[10] | d[11]) && !memcmp(d + 14, "MTrk", 4))
-        return MD_FORMAT_MIDI;
-    if (n >= 20 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "RMID", 4))
-        return MD_FORMAT_MIDI;
+        return 1;
+    return n >= 20 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "RMID", 4);
+}
+
+uint32_t md_tune_sniff(const uint8_t *d, uint32_t n)
+{
     if (n >= 0x76 && (!memcmp(d, "PSID", 4) || !memcmp(d, "RSID", 4)))
         return MD_FORMAT_SID;
     return 0;
-}
-
-static const char *soundfont(void)
-{
-    static const char *const fonts[] = { "/usr/share/sounds/sf2/FluidR3_GM.sf2", "/usr/share/sounds/sf2/default-GM.sf2",
-                                         "/usr/share/soundfonts/default.sf2", "/usr/share/soundfonts/FluidR3_GM.sf2",
-                                         NULL };
-    const char *env = getenv("OPENSERVICE_SOUNDFONT");
-    const char *const *f;
-
-    if (env && *env)
-        return env;
-    for (f = fonts; *f; f++)
-        if (access(*f, R_OK) == 0)
-            return *f;
-    return NULL;
 }
 
 uint8_t *md_tune_render(const uint8_t *d, uint32_t n, uint32_t kind, uint32_t *len)
@@ -438,6 +425,7 @@ uint8_t *md_tune_render(const uint8_t *d, uint32_t n, uint32_t kind, uint32_t *l
     size_t got;
     int rc = -1;
 
+    (void)kind;                                  /* only SID tunes now (MIDI left on 17 November 2026) */
     if (hr_cache_dir("sound", dir, sizeof dir))
         return NULL;
     hr_key(d, n, k, sizeof k);
@@ -445,26 +433,18 @@ uint8_t *md_tune_render(const uint8_t *d, uint32_t n, uint32_t kind, uint32_t *l
     if (!(stat(wav, &sb) == 0 && sb.st_size > 44)) {
         if (hr_tempdir(tmp, sizeof tmp))
             return NULL;
-        snprintf(src, sizeof src, "%s/in.%s", tmp, kind == MD_FORMAT_MIDI ? "mid" : "sid");
+        snprintf(src, sizeof src, "%s/in.sid", tmp);
         snprintf(dst, sizeof dst, "%s/out.wav", tmp);
         if (hr_write(src, d, n) == 0) {
-            if (kind == MD_FORMAT_MIDI) {
-                const char *sf = soundfont();
-                char *fs[] = { "fluidsynth", "-n", "-i", "-q", "-F", dst, "-r", "44100", "-T", "wav",
-                               (char *)sf, src, NULL };
-                if (sf)
-                    rc = hr_run(fs, -1);
-            } else {
-                /* SID tunes play for ever; OPENSERVICE_SIDSECONDS of it (default 60:
-                 * the whole length is rendered before the guest hears back, and
-                 * 180 s took 21 s and an 8 MB buffer on the Amiga). */
-                env = getenv("OPENSERVICE_SIDSECONDS");
-                snprintf(secs, sizeof secs, "-t%u", env && atoi(env) > 0 ? (unsigned)atoi(env) : 60u);
-                snprintf(opt, sizeof opt, "-w%s", dst);
-                {
-                    char *sp[] = { "sidplayfp", "-q", secs, opt, src, NULL };
-                    rc = hr_run(sp, -1);
-                }
+            /* SID tunes play for ever; OPENSERVICE_SIDSECONDS of it (default 60:
+             * the whole length is rendered before the guest hears back, and
+             * 180 s took 21 s and an 8 MB buffer on the Amiga). */
+            env = getenv("OPENSERVICE_SIDSECONDS");
+            snprintf(secs, sizeof secs, "-t%u", env && atoi(env) > 0 ? (unsigned)atoi(env) : 60u);
+            snprintf(opt, sizeof opt, "-w%s", dst);
+            {
+                char *sp[] = { "sidplayfp", "-q", secs, opt, src, NULL };
+                rc = hr_run(sp, -1);
             }
             if (rc == 0 && (stat(dst, &sb) != 0 || sb.st_size <= 44 || hr_move(dst, wav) != 0))
                 rc = -1;

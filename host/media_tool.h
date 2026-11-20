@@ -1,7 +1,7 @@
 /*
  * media.decode/1, the half that runs host tools (media_tool.c): camera RAW
  * through LibRaw's dcraw_emu, the raster formats ImageMagick reads (XCF,
- * TGA, PCX, ...; md_magick_coder), MIDI through FluidSynth and SID tunes
+ * TGA, PCX, ...; md_magick_coder), and SID tunes
  * through sidplayfp.
  * MIT, Copyright (c) 2026 AmiCradle Team.
  */
@@ -28,7 +28,10 @@ int md_tool_picture(const uint8_t *d, uint32_t n, const char *hint, int raw, uin
  * picture, or a comic book's first page (hint "cbz"); NULL when none. */
 uint8_t *md_zip_picture(const uint8_t *d, uint32_t n, const char *hint, uint32_t *format, uint32_t *len);
 
-/* 'MIDI' or 'SID ' when the bytes are a tune the host renders, else 0. */
+/* A MIDI file (MThd, or RIFF RMID). media.decode/1 refuses these: MIDI is played on the Amiga by
+ * gfopenmidi.datatype through gfopensynth.library, our own synth (17 November 2026). */
+int md_is_midi(const uint8_t *d, uint32_t n);
+/* 'SID ' when the bytes are a tune the host renders, else 0. */
 uint32_t md_tune_sniff(const uint8_t *d, uint32_t n);
 /* The tune rendered to a WAV file (malloc'd, cached); NULL on failure. */
 uint8_t *md_tune_render(const uint8_t *d, uint32_t n, uint32_t kind, uint32_t *len);

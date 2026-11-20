@@ -59,7 +59,7 @@ if [ -f /usr/include/openssl/evp.h ]; then
 fi
 # media.decode/1: pictures with libavif, and libheif with its HEVC decoder
 # plugin; sounds, video and most pictures with FFmpeg when its headers are
-# there; RAW, ImageMagick, MIDI and SID through those tools at run time.
+# there; RAW, ImageMagick and SID through those tools at run time.
 # NDECODE (the Amiga's own picture decoders, docs/MEDIA_DECODE.md) when the
 # gfopendatatypes checkout and libwebp's tarball are to hand
 # (host/build_native.sh); without them NDECODE says no and the Amiga decodes.
