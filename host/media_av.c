@@ -162,7 +162,28 @@ struct sink {
     uint64_t skip, room, pos, written;
     uint8_t *out;
     uint32_t channels;
+    struct carry *carry;       /* frames past room kept here, or dropped when NULL */
 };
+
+/* Decoded frames a DECODE had no room for, handed out by the next one. */
+struct carry {
+    int16_t *pcm;
+    uint32_t n, cap;           /* frames */
+};
+
+static void carry_add(struct carry *c, const int16_t *pcm, uint32_t channels)
+{
+    if (c->n == c->cap) {
+        uint32_t cap = c->cap ? c->cap * 2 : 4096;
+        int16_t *p = realloc(c->pcm, (size_t)cap * channels * 2);
+        if (!p)
+            return;
+        c->pcm = p;
+        c->cap = cap;
+    }
+    memcpy(c->pcm + (size_t)c->n * channels, pcm, channels * 2);
+    c->n++;
+}
 
 static void sink_put(struct sink *k, const int16_t *pcm, int n)
 {
@@ -170,8 +191,13 @@ static void sink_put(struct sink *k, const int16_t *pcm, int n)
     uint32_t c;
 
     for (i = 0; i < n; i++, k->pos++) {
-        if (k->pos < k->skip || !k->out || k->written >= k->room)
+        if (k->pos < k->skip || !k->out)
             continue;
+        if (k->written >= k->room) {
+            if (k->carry)
+                carry_add(k->carry, pcm + i * k->channels, k->channels);
+            continue;
+        }
         for (c = 0; c < k->channels; c++) {
             int16_t v = pcm[i * k->channels + c];
             uint8_t *o = k->out + (k->written * k->channels + c) * 2;
@@ -249,6 +275,25 @@ int md_sound_probe(const struct md_buffer *file, const uint32_t extra[4], uint8_
     return st;
 }
 
+/* Decodes packets into k until room frames are written or the stream ends
+ * (then flushes the decoder and the resampler once). 1 at the end. */
+static int sound_fill(struct sound *s, struct sink *k)
+{
+    k->channels = s->channels;
+    while (k->written < k->room) {
+        if (av_read_frame(s->fmt, s->pkt) < 0) {
+            avcodec_send_packet(s->dec, NULL);
+            drain(s, k);
+            resample(s, k, NULL, 0);
+            return 1;
+        }
+        if (s->pkt->stream_index == s->stream && avcodec_send_packet(s->dec, s->pkt) >= 0)
+            drain(s, k);
+        av_packet_unref(s->pkt);
+    }
+    return 0;
+}
+
 int md_sound_decode(const struct md_buffer *file, uint32_t first, const uint32_t extra[4], struct md_buffer *out,
                     uint32_t *result, uint32_t *aux)
 {
@@ -263,7 +308,7 @@ int md_sound_decode(const struct md_buffer *file, uint32_t first, const uint32_t
             k.skip = first;
             k.out = out->out;
             k.room = out->length / (s.channels * 2);
-            sound_run(&s, &k);
+            sound_fill(&s, &k);
             out->written = (uint32_t)(k.written * s.channels * 2);
             *result = (uint32_t)k.written;
             *aux = s.rate;
@@ -271,6 +316,114 @@ int md_sound_decode(const struct md_buffer *file, uint32_t first, const uint32_t
     }
     sound_close(&s);
     return st;
+}
+
+/* A streaming reader DECODEs a file a piece at a time from where the last
+ * piece ended. Each file's decoder is kept open between them, with the
+ * frames a piece had no room for, so a piece costs its own frames only. */
+#define STREAMS 4
+
+struct stream {
+    const uint8_t *in;
+    uint32_t length, maxch, maxrate, sum;
+    uint64_t next;             /* the frame the next piece starts at */
+    uint64_t used;
+    int open, ended;
+    struct sound s;
+    struct carry carry;
+};
+
+static struct stream streams[STREAMS];
+static uint64_t streams_used;
+static pthread_mutex_t streams_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The file's first and last 4 KB and its length: the same buffer address
+ * may hold another file later. */
+static uint32_t stream_sum(const uint8_t *d, uint32_t n)
+{
+    uint32_t h = 2166136261u ^ n, i, m = n < 4096 ? n : 4096;
+    for (i = 0; i < m; i++)
+        h = (h ^ d[i]) * 16777619u;
+    for (i = n - m; i < n; i++)
+        h = (h ^ d[i]) * 16777619u;
+    return h;
+}
+
+static void stream_close(struct stream *t)
+{
+    if (t->open)
+        sound_close(&t->s);
+    free(t->carry.pcm);
+    memset(t, 0, sizeof *t);
+}
+
+int md_sound_decode_stream(const struct md_buffer *file, uint32_t first, const uint32_t extra[4],
+                           struct md_buffer *out, uint32_t *result, uint32_t *aux)
+{
+    struct stream *t = NULL;
+    struct sink k = { 0 };
+    uint32_t sum = stream_sum(file->in, file->length), i, take, c;
+    int st = MD_OK;
+
+    pthread_mutex_lock(&streams_lock);
+    for (i = 0; i < STREAMS; i++) {
+        struct stream *u = &streams[i];
+        if (u->open && u->in == file->in && u->length == file->length && u->sum == sum
+            && u->maxch == extra[0] && u->maxrate == extra[1] && u->next == first) {
+            t = u;
+            break;
+        }
+    }
+    if (!t) {                                   /* a new file, or a jump: from the start */
+        for (t = &streams[0], i = 1; i < STREAMS; i++)
+            if (!streams[i].open || streams[i].used < t->used)
+                t = &streams[i];
+        stream_close(t);
+        if ((st = sound_open(&t->s, file->in, file->length, extra[0], extra[1])) != MD_OK) {
+            sound_close(&t->s);
+            memset(t, 0, sizeof *t);
+            pthread_mutex_unlock(&streams_lock);
+            return st;
+        }
+        t->open = 1;
+        t->in = file->in;
+        t->length = file->length;
+        t->sum = sum;
+        t->maxch = extra[0];
+        t->maxrate = extra[1];
+        k.skip = first;                         /* decoded and dropped up to first */
+    }
+    t->used = ++streams_used;
+    c = t->s.channels;
+    if (out->length < c * 2) {
+        pthread_mutex_unlock(&streams_lock);
+        return MD_TOOSMALL;
+    }
+    k.out = out->out;
+    k.room = out->length / (c * 2);
+    k.channels = c;
+    k.carry = &t->carry;
+    take = t->carry.n < k.room ? t->carry.n : (uint32_t)k.room;
+    if (take) {                                 /* last piece's leftovers first */
+        struct carry left = t->carry;
+        uint32_t j;
+        memset(&t->carry, 0, sizeof t->carry);
+        k.pos = k.skip;
+        k.carry = NULL;
+        sink_put(&k, left.pcm, (int)take);
+        k.carry = &t->carry;
+        for (j = take; j < left.n; j++)
+            carry_add(&t->carry, left.pcm + (size_t)j * c, c);
+        free(left.pcm);
+    }
+    if (!t->ended && k.written < k.room)
+        t->ended = sound_fill(&t->s, &k);
+    t->next = first + k.written;
+    out->written = (uint32_t)(k.written * c * 2);
+    *result = (uint32_t)k.written;
+    *aux = t->s.rate;
+    pthread_mutex_unlock(&streams_lock);
+    return MD_OK;
 }
 
 /* 1 when FFmpeg recognises the file's first bytes. */
