@@ -31,8 +31,10 @@
  *     RECT event says so. The RTG surface the design falls to (stage c) is
  *     not here yet. RTG_SURFACE and CHIPSET are ACM_E_FORMAT.
  *   - ACM_FRAME gives YUV420 (planar: Y at pitch, then U and V at pitch / 2)
- *     at the decoded size; other formats or sizes are ACM_E_FORMAT (the
- *     conversions and scaling are stage c).
+ *     at the decoded size, or ARGB32 (A, R, G, B bytes, A 255) at any size up
+ *     to 4096 x 4096, scaled here: what a player with no plane (the x86's
+ *     Radeon has none) draws into its window. BT.709 from 720 rows up, BT.601
+ *     below, limited range. Other formats are ACM_E_FORMAT.
  *   - sources: whatever the runtime's source hook opens (ACM_SRC_ACFS);
  *     ACM_FEED is ACM_E_BADARG (no feed session in the core).
  *   - CONTROL: PLAY, PAUSE, STOP (paused at the start), SEEK, RATE (1/16 to
@@ -871,21 +873,62 @@ static int source_frame_ok(const struct sess *s, const struct acm_frame *f) {
     return 1;
 }
 
+#define RT_ARGB_MAX 4096u
+static uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+/* f (YUV420P or NV12, checked) at w x h ARGB32 into out (pitch bytes a row): each pixel the source's nearest
+ * to its centre. Limited range; BT.709's matrix from 720 rows up, BT.601's below. 16.16 fixed point. */
+static void to_argb(const uint8_t *base, const struct acm_frame *f, uint8_t *out, uint32_t pitch, uint32_t w, uint32_t h) {
+    uint32_t fw = f->width, fh = f->height;
+    int hd = fh >= 720;
+    int cr = hd ? 103206 : 91881, cgu = hd ? 12276 : 22554, cgv = hd ? 30679 : 46802, cb = hd ? 121609 : 116130;   /* x 65536 */
+    static __thread uint32_t xs[RT_ARGB_MAX];
+    for (uint32_t x = 0; x < w; x++) { uint32_t sx = (uint32_t)(((uint64_t)(2 * x + 1) * fw) / (2 * w)); xs[x] = sx < fw ? sx : fw - 1; }
+    const uint8_t *Y = base + f->offset[0], *U = base + f->offset[1], *V = f->pixfmt == ACM_PIX_YUV420P ? base + f->offset[2] : NULL;
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t sy = (uint32_t)(((uint64_t)(2 * y + 1) * fh) / (2 * h)); if (sy >= fh) sy = fh - 1;
+        const uint8_t *yr = Y + (size_t)sy * f->pitch[0], *ur = U + (size_t)(sy / 2) * f->pitch[1];
+        const uint8_t *vr = V ? V + (size_t)(sy / 2) * f->pitch[2] : NULL;
+        uint8_t *o = out + (size_t)y * pitch;
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t sx = xs[x], cx = sx / 2;
+            int yy = (yr[sx] - 16) * 76309;                          /* 255/219 x 65536 */
+            int u = (V ? ur[cx] : ur[2 * cx]) - 128, v = (V ? vr[cx] : ur[2 * cx + 1]) - 128;
+            o[0] = 255;
+            o[1] = clamp8((yy + cr * v + 32768) >> 16);
+            o[2] = clamp8((yy - cgu * u - cgv * v + 32768) >> 16);
+            o[3] = clamp8((yy + cb * u + 32768) >> 16);
+            o += 4;
+        }
+    }
+}
+
 static int32_t be_frame(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, uint32_t pitch, uint32_t format, uint32_t w, uint32_t h) {
     (void)ctx;
     struct sess *s = get(slot);
     if (!s) return ACM_E_NOSUCH;
-    if (format != ACMG_PIX_YUV420) return ACM_E_FORMAT;          /* the conversions are stage c */
+    if (format != ACMG_PIX_YUV420 && format != ACMG_PIX_ARGB32) return ACM_E_FORMAT;
+    if (format == ACMG_PIX_ARGB32 && (w > RT_ARGB_MAX || h > RT_ARGB_MAX)) return ACM_E_TOOBIG;
     pthread_mutex_lock(&s->mu);
     int32_t r;
     if (s->state == ACM_STATE_ERROR) r = ACM_E_DECODER;
-    else if (s->opened && ((w && w != s->op.width) || (h && h != s->op.height))) r = ACM_E_FORMAT;   /* no scaling in the core */
+    else if (format == ACMG_PIX_YUV420 && s->opened && ((w && w != s->op.width) || (h && h != s->op.height))) r = ACM_E_FORMAT;   /* YUV: no scaling */
     else if (s->vroute == ACMG_ROUTE_PLANE) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;   /* the frames are acscreen's */
     else if (!s->ready || s->taken) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;
     else {
         const struct acm_frame *f = &s->rf;
         if (!source_frame_ok(s, f)) r = ACM_E_DECODER;
-        else {
+        else if (format == ACMG_PIX_ARGB32) {
+            uint32_t ow = w ? w : f->width, oh = h ? h : f->height;
+            if (!pitch) pitch = 4 * ow;
+            if (ow > RT_ARGB_MAX || oh > RT_ARGB_MAX) r = ACM_E_TOOBIG;
+            else if (pitch < 4 * ow) r = ACM_E_BADARG;
+            else if ((uint64_t)pitch * (oh - 1) + 4ull * ow > len) r = ACM_E_TOOBIG;
+            else {
+                to_argb(s->w.pool + (size_t)f->slot * s->w.slot_size, f, out, pitch, ow, oh);
+                s->taken = 1;
+                r = (int32_t)(f->pts_ms < 0 ? 0 : f->pts_ms > 0x7fffffff ? 0x7fffffff : f->pts_ms);
+            }
+        } else {
             uint32_t fw = f->width, fh = f->height, cw = (fw + 1) / 2, chh = (fh + 1) / 2;
             if (!pitch) pitch = fw;
             if ((w && w != fw) || (h && h != fh)) r = ACM_E_FORMAT;   /* no scaling in the core */
