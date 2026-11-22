@@ -76,6 +76,7 @@ uint32_t acm_tag_parse(const char *s);
 #define RT_AUDIO_QUEUE 8             /* about 170 ms at the worker's usual 1024/48 kHz blocks */
 #define RT_AUDIO_IDLE_NS 500000000ull /* abandon only an unread tail, not active playback */
 #define RT_AUDIO_AHEAD_MS 500         /* bound a buffering guest ahead of due video */
+static int machine_av_ms(void);
 #define RT_NEXT_MS 10000              /* the watchdog on one frame */
 #define RT_ASK_MS 2000
 #define RT_POOL_MAX (768ull << 20)     /* the worker uses the same total cap */
@@ -133,6 +134,8 @@ struct sess {
     struct acm_frame nf;
     int nfds, fds[ACM_MAX_FDS];
     uint64_t base_ns;
+    int32_t av_ms;                       /* AVDELAY: -1 the machine's (AC_ACMEDIA_AV_MS) */
+    int32_t av_used;                     /* the delay in base_ns */
     int64_t base_pts;
     int based;
     int veof, aeof;
@@ -605,7 +608,10 @@ static void step(struct sess *s) {
         static __thread uint8_t buf[sizeof(struct acm_frame) + 256];
         uint32_t want = ACM_WANT_VIDEO | (s->plane && s->pl.on ? ACM_WANT_DMABUF : 0);
         s->nfds = 0;
-        int r = acm_ask(&s->w, ACM_Q_NEXT, &(struct acm_next){ want, 0 }, sizeof(struct acm_next), NULL, 0, &t, buf, sizeof buf, &len,
+        /* The film in a window on the plane: the worker shrinks it when it is shown at less than half its size */
+        uint32_t fit = s->plane && s->pl.on && s->rect.space == ACV_SPACE_RTG && s->rect.w && s->rect.h
+                     ? ACM_NEXT_FIT(s->rect.w, s->rect.h) : 0;
+        int r = acm_ask(&s->w, ACM_Q_NEXT, &(struct acm_next){ want, fit }, sizeof(struct acm_next), NULL, 0, &t, buf, sizeof buf, &len,
                         s->fds, &s->nfds, RT_NEXT_MS);
         if (!r && t != ACM_A_FRAME) {
             for (int i = 0; i < s->nfds; i++) close(s->fds[i]);
@@ -639,7 +645,16 @@ static void step(struct sess *s) {
         }
     }
     int64_t pts = s->nf.pts_ms < 0 ? s->pos_ms : s->nf.pts_ms;
-    if (!s->based) { s->base_ns = now_ns(); s->base_pts = pts; s->based = 1; }
+    if (!s->based) {
+        /* The sound reaches the speaker later than it is read: the guest's AHI buffers, then the host's. The
+         * pictures wait as long (AC_ACMEDIA_AV_MS, the machine's; 22 Nov 2026 PiMiga: about 300 ms). */
+        pthread_mutex_lock(&s->mu);
+        int av = s->av_ms >= 0 ? s->av_ms : machine_av_ms();
+        s->av_used = av;
+        pthread_mutex_unlock(&s->mu);
+        s->base_ns = now_ns() + (s->op.audio >= 0 ? (uint64_t)av * 1000000ull : 0);
+        s->base_pts = pts; s->based = 1;
+    }
     uint32_t rate = s->rate ? s->rate : 65536;
     int64_t dt = pts - s->base_pts;
     uint64_t due = s->base_ns + (uint64_t)(dt > 0 ? dt : 0) * 1000000ull * 65536ull / rate;
@@ -685,6 +700,14 @@ static void step(struct sess *s) {
     s->nfds = 0;
     if (had) acm_plane_release(&s->w, old);
     if (mask & ACMG_EVM(ACMG_EV_FRAME)) post(s->handle, ACMG_EV_FRAME, (uint32_t)pts, 0);
+}
+
+/* The machine's picture delay (its hardware template: AC_ACMEDIA_AV_MS) */
+static int machine_av_ms(void)
+{
+    static int av = -1;
+    if (av < 0) { const char *e = getenv("AC_ACMEDIA_AV_MS"); av = e ? atoi(e) : 0; if (av < 0 || av > 2000) av = 0; }
+    return av;
 }
 
 static void *sess_main(void *a) {
@@ -756,7 +779,7 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     struct sess *s = calloc(1, sizeof *s);
     if (!s) return ACM_E_LIMIT;
     s->rt = &R; s->slot = slot; s->handle = handle; s->streams = streams; s->vkind = vk; s->akind = ak; s->flags = flags; s->fd = -1;
-    s->rate = 65536; s->volume = 65536; s->state = ACM_STATE_OPENING;
+    s->rate = 65536; s->volume = 65536; s->state = ACM_STATE_OPENING; s->av_ms = -1;
     s->evmask = flags & ACMG_OF_EVENTS_FRAME ? ACMG_EVM(ACMG_EV_FRAME) : 0;
     s->rect.space = ACV_SPACE_RTG; s->rect.visible = 1;
     if (vk == ACMG_OUT_PLANE) {
@@ -837,6 +860,11 @@ static int32_t be_control(void *ctx, uint32_t slot, uint32_t cmd, const uint32_t
         r = queue(s, C_RECT, 0, 0);
         break;
     case ACMG_CTL_EVENTS: s->evmask = a[0]; break;
+    case ACMG_CTL_AVDELAY:                        /* the player's own (its icon's AVDELAY), at once */
+        if (a[0] > 2000) { r = ACM_E_BADARG; break; }
+        if (s->based && s->op.audio >= 0) s->base_ns += ((int64_t)a[0] - s->av_used) * 1000000ll;
+        s->av_ms = (int32_t)a[0]; s->av_used = (int32_t)a[0];
+        break;
     default: r = ACM_E_BADARG; break;             /* SELECT, TARGET: not in the core */
     }
     pthread_mutex_unlock(&s->mu);

@@ -44,6 +44,7 @@
 #include <libavutil/pixdesc.h>
 #include <libavutil/channel_layout.h>
 #include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
 
 #include "acm_proto.h"
 #include "acm_msg.h"
@@ -735,7 +736,33 @@ static int send_dmabuf(AVFrame *f, struct acm_frame *fr)
     return acm_send(sock, ACM_A_FRAME, fr, sizeof *fr, NULL, 0, fds, d->nb_objects) ? ACM_E_IO : 1;
 }
 
-static void do_next_video(uint32_t want)
+/* The film shown much smaller than it is (acm_next's fit): shrunk here, area-averaged, to the size shown. */
+static struct SwsContext *fit_sws;
+static int fit_wanted(uint32_t fit, int w, int h, int *tw, int *th)
+{
+    int fw = (int)(fit >> 16), fh = (int)(fit & 0xffff);
+    if (!fit || fw < 16 || fh < 16 || (w <= 2 * fw && h <= 2 * fh)) return 0;
+    *tw = fw & ~1; *th = fh & ~1;
+    return 1;
+}
+static AVFrame *fit_frame(AVFrame *f, int tw, int th)
+{
+    AVFrame *o = av_frame_alloc();
+    if (!o) return NULL;
+    o->format = AV_PIX_FMT_YUV420P; o->width = tw; o->height = th;
+    fit_sws = sws_getCachedContext(fit_sws, f->width, f->height, (enum AVPixelFormat)f->format, tw, th, AV_PIX_FMT_YUV420P,
+                                   SWS_AREA, NULL, NULL, NULL);
+    if (!fit_sws || av_frame_get_buffer(o, 0) < 0 ||
+        sws_scale(fit_sws, (const uint8_t * const *)f->data, f->linesize, 0, f->height, o->data, o->linesize) <= 0) {
+        av_frame_free(&o);
+        return NULL;
+    }
+    o->pts = f->pts; o->best_effort_timestamp = f->best_effort_timestamp; o->flags = f->flags;
+    o->color_range = f->color_range; o->colorspace = f->colorspace;
+    return o;
+}
+
+static void do_next_video(uint32_t want, uint32_t fit)
 {
     if (!V.c) { reply_error(ACM_E_BADARG, 0, "no video open"); return; }
     if (!pool && !(want & ACM_WANT_DMABUF)) { reply_error(ACM_E_BADARG, 0, "no pool"); return; }
@@ -771,7 +798,8 @@ static void do_next_video(uint32_t want)
         fr.flags |= ACM_FF_HW;
         AVHWFramesContext *hc = (AVHWFramesContext *)f->hw_frames_ctx->data;
         fr.pixfmt = acm_pix(hc->sw_format);
-        if (want & ACM_WANT_DMABUF) {
+        int tw, th;
+        if ((want & ACM_WANT_DMABUF) && !fit_wanted(fit, f->width, f->height, &tw, &th)) {
             r = send_dmabuf(f, &fr);
             av_frame_free(&f);
             if (r != 1) reply_error(r, 0, "dma-buf");
@@ -785,12 +813,23 @@ static void do_next_video(uint32_t want)
         }
         av_frame_free(&f);
         f = sw;
+        if (fit_wanted(fit, f->width, f->height, &tw, &th)) {
+            AVFrame *z = fit_frame(f, tw, th);
+            if (z) { av_frame_free(&f); f = z; fr.width = (uint32_t)tw; fr.height = (uint32_t)th; }
+        }
         fr.pixfmt = acm_pix(f->format);
         r = copy_to_slot(f, &fr);
         av_frame_free(&f);
         if (r) { reply_error(r, 0, "pool"); return; }
         acm_send(sock, ACM_A_FRAME, &fr, sizeof fr, NULL, 0, NULL, 0);
         return;
+    }
+    {
+        int tw, th;
+        if (fit_wanted(fit, f->width, f->height, &tw, &th)) {
+            AVFrame *z = fit_frame(f, tw, th);
+            if (z) { av_frame_free(&f); f = z; fr.width = (uint32_t)tw; fr.height = (uint32_t)th; }
+        }
     }
     fr.pixfmt = acm_pix(f->format);
     /* decoded into the pool already? */
@@ -983,7 +1022,7 @@ int main(int argc, char **argv)
         case ACM_Q_NEXT: {
             NEED(struct acm_next);
             const struct acm_next *n = (const void *)rx;
-            if (n->want & ACM_WANT_AUDIO) do_next_audio(); else do_next_video(n->want);
+            if (n->want & ACM_WANT_AUDIO) do_next_audio(); else do_next_video(n->want, n->fit);
             break;
         }
         case ACM_Q_RELEASE: NEED(struct acm_release); do_release(((const struct acm_release *)rx)->slot); break;
