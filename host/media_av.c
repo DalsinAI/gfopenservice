@@ -10,12 +10,14 @@
 #include "media_av.h"
 #include "ham8.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
@@ -668,9 +670,113 @@ struct video {
     uint32_t vq_head, vq_n, vq_cap;
     struct track *sound;       /* VSOUND's, opened at the first VSOUND */
     struct pindex *px;         /* VINDEX's packets and decoder, for VFRAME's MD_PIX_WEBM */
+    AVFrame *sw;               /* a hardware frame copied to memory (VA-API), for the scaler */
+    int said;                  /* where its frames are decoded has been logged */
 };
 
 static void pindex_free(struct pindex *x);
+
+/* ---- hardware decoding (VA-API) ------------------------------------------
+ *
+ * OPENSERVICE_HWACCEL=vaapi (the machine's hardware template, AmiCradle's
+ * appliances/templates, writes it where the machine has a VA-API video
+ * engine: the x86 appliance's RX 580, UVD 6) decodes video on the graphics
+ * card. OPENSERVICE_VAAPI_DEVICE names the render node (default: VA-API's
+ * own pick, /dev/dri/renderD128). Any doubt falls back to the CPU: no
+ * device, a codec the card can't do (the decoder offers no VA-API format),
+ * or a frame that won't copy back. Pictures (stills) stay on the CPU. */
+
+static enum AVPixelFormat pick_vaapi(AVCodecContext *c, const enum AVPixelFormat *fmts)
+{
+    for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++)
+        if (*p == AV_PIX_FMT_VAAPI)
+            return *p;
+    return avcodec_default_get_format(c, fmts);     /* the card can't: the CPU's format */
+}
+
+static AVBufferRef *vaapi_device(void)
+{
+    static AVBufferRef *dev;
+    static int tried;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    AVBufferRef *ref = NULL;
+
+    pthread_mutex_lock(&lock);
+    if (!tried) {
+        const char *node = getenv("OPENSERVICE_VAAPI_DEVICE");
+        tried = 1;
+        if (av_hwdevice_ctx_create(&dev, AV_HWDEVICE_TYPE_VAAPI, node && *node ? node : NULL, NULL, 0) < 0)
+            dev = NULL;
+    }
+    if (dev)
+        ref = av_buffer_ref(dev);
+    pthread_mutex_unlock(&lock);
+    return ref;
+}
+
+/* Called before avcodec_open2: the decoder decodes on the card when it can.
+ * Returns 1 when it was set up for the card. */
+static int hw_attach(AVCodecContext *dec, const AVCodec *codec)
+{
+    const char *want = getenv("OPENSERVICE_HWACCEL");
+    AVBufferRef *ref;
+    int ok = 0;
+
+    if (!want || strcmp(want, "vaapi"))
+        return 0;
+    for (int i = 0;; i++) {
+        const AVCodecHWConfig *cfg = avcodec_get_hw_config(codec, i);
+        if (!cfg)
+            break;
+        if (cfg->device_type == AV_HWDEVICE_TYPE_VAAPI && (cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+            ok = 1;
+            break;
+        }
+    }
+    if (!ok || !(ref = vaapi_device()))
+        return 0;
+    dec->hw_device_ctx = ref;
+    dec->get_format = pick_vaapi;
+    dec->thread_count = 1;                            /* the card decodes: no frame threads */
+    return 1;
+}
+
+/* The frame the scaler reads: frame itself, or (a VA-API frame) its copy in
+ * memory in sw. NULL when the copy fails. The first frame of a video asked
+ * to go to the card says, once, where it was decoded. */
+static AVFrame *in_memory(AVCodecContext *dec, AVFrame *frame, AVFrame **sw, int *said)
+{
+    if (!*said && dec->hw_device_ctx) {
+        *said = 1;
+        fprintf(stderr, "media.decode: %s %dx%d %s\n", dec->codec->name, frame->width, frame->height,
+                frame->format == AV_PIX_FMT_VAAPI ? "decoded on the graphics card (VA-API)"
+                                                  : "decoded on the CPU (the card can't do this one)");
+    }
+    if (frame->format != AV_PIX_FMT_VAAPI)
+        return frame;
+    if (!*sw && !(*sw = av_frame_alloc()))
+        return NULL;
+    av_frame_unref(*sw);
+    if (av_hwframe_transfer_data(*sw, frame, 0) < 0)
+        return NULL;
+    (*sw)->best_effort_timestamp = frame->best_effort_timestamp;
+    return *sw;
+}
+
+/* Opens dec on the card when OPENSERVICE_HWACCEL asks and the card can, else
+ * on the CPU as before. */
+static int open_decoder(AVCodecContext **dec, const AVCodec *codec, const AVCodecParameters *par)
+{
+    if (hw_attach(*dec, codec)) {
+        if (avcodec_open2(*dec, codec, NULL) >= 0)
+            return 0;                                 /* the first frame says where it was decoded (in_memory) */
+        avcodec_free_context(dec);                    /* the card refused it: the CPU */
+        if (!(*dec = avcodec_alloc_context3(codec)) || avcodec_parameters_to_context(*dec, par) < 0)
+            return -1;
+        (*dec)->thread_count = 4;
+    }
+    return avcodec_open2(*dec, codec, NULL);
+}
 
 /* A video's sound for VSOUND: 8-bit signed mono at the rate asked, kept as
  * a window of samples by their place from time zero. A file's sound has a
@@ -726,6 +832,7 @@ static void video_free(struct video *v)
     track_free(v->sound);
     av_frame_free(&v->frame);
     av_frame_free(&v->rgb);
+    av_frame_free(&v->sw);
     av_packet_free(&v->pkt);
     sws_freeContext(v->sws);
     avcodec_free_context(&v->dec);
@@ -849,7 +956,7 @@ static int video_open(struct video *v, const uint8_t *d, uint32_t n, int own, ui
     if (!(v->dec = avcodec_alloc_context3(codec)) || avcodec_parameters_to_context(v->dec, st->codecpar) < 0)
         return MD_HOSTERROR;
     v->dec->thread_count = 4;
-    if (avcodec_open2(v->dec, codec, NULL) < 0 || v->dec->width <= 0 || v->dec->height <= 0)
+    if (open_decoder(&v->dec, codec, st->codecpar) < 0 || v->dec->width <= 0 || v->dec->height <= 0)
         return MD_BADREQUEST;
     if (!(v->pkt = av_packet_alloc()) || !(v->frame = av_frame_alloc()) || !(v->rgb = av_frame_alloc()))
         return MD_HOSTERROR;
@@ -883,9 +990,8 @@ static int video_open(struct video *v, const uint8_t *d, uint32_t n, int own, ui
     v->nsrc = v->frames;
 
     md_fit(v->dec->width, v->dec->height, maxw, maxh, &v->ow, &v->oh);
-    if (!(v->sws = sws_getContext(v->dec->width, v->dec->height, v->dec->pix_fmt, v->ow, v->oh, AV_PIX_FMT_RGB24,
-                                  SWS_AREA, NULL, NULL, NULL)))
-        return MD_HOSTERROR;
+    /* the scaler is made at the first frame (video_seek_decode), from what it
+     * is in memory: the decoder's own format, or NV12 from the card */
     v->rgb->format = AV_PIX_FMT_RGB24;
     v->rgb->width = v->ow;
     v->rgb->height = v->oh;
@@ -932,7 +1038,13 @@ static int video_seek_decode(struct video *v, uint32_t want)
         if (r == 0) {
             int64_t t = v->frame->best_effort_timestamp;
             if (t == AV_NOPTS_VALUE || t >= target) {
-                sws_scale(v->sws, (const uint8_t *const *)v->frame->data, v->frame->linesize, 0, v->dec->height,
+                AVFrame *f = in_memory(v->dec, v->frame, &v->sw, &v->said);
+                if (!f || !(v->sws = sws_getCachedContext(v->sws, f->width, f->height, f->format, v->ow, v->oh,
+                                                          AV_PIX_FMT_RGB24, SWS_AREA, NULL, NULL, NULL))) {
+                    av_frame_unref(v->frame);
+                    return MD_HOSTERROR;
+                }
+                sws_scale(v->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height,
                           v->rgb->data, v->rgb->linesize);
                 av_frame_unref(v->frame);
                 v->next = want + 1;
@@ -1033,7 +1145,7 @@ static int video_open_url(struct video *v, const char *url, uint32_t maxw, uint3
     if (!(v->dec = avcodec_alloc_context3(codec)) || avcodec_parameters_to_context(v->dec, st->codecpar) < 0)
         return MD_HOSTERROR;
     v->dec->thread_count = 4;
-    if (avcodec_open2(v->dec, codec, NULL) < 0 || v->dec->width <= 0 || v->dec->height <= 0)
+    if (open_decoder(&v->dec, codec, st->codecpar) < 0 || v->dec->width <= 0 || v->dec->height <= 0)
         return MD_BADREQUEST;
     if (!(v->pkt = av_packet_alloc()) || !(v->frame = av_frame_alloc()) || !(v->rgb = av_frame_alloc()))
         return MD_HOSTERROR;
@@ -1089,12 +1201,13 @@ static int live_decode(struct video *v, uint32_t index)
             int64_t t = v->frame->best_effort_timestamp;
             int64_t us = t == AV_NOPTS_VALUE ? target : av_rescale_q(t, tb, AV_TIME_BASE_Q);
             if (us + half >= target || v->shown == UINT32_MAX) {
-                if (!(v->sws = sws_getCachedContext(v->sws, v->frame->width, v->frame->height, v->frame->format,
-                                                    v->ow, v->oh, AV_PIX_FMT_RGB24, SWS_AREA, NULL, NULL, NULL))) {
+                AVFrame *f = in_memory(v->dec, v->frame, &v->sw, &v->said);
+                if (!f || !(v->sws = sws_getCachedContext(v->sws, f->width, f->height, f->format,
+                                                          v->ow, v->oh, AV_PIX_FMT_RGB24, SWS_AREA, NULL, NULL, NULL))) {
                     av_frame_unref(v->frame);
                     return MD_HOSTERROR;
                 }
-                sws_scale(v->sws, (const uint8_t *const *)v->frame->data, v->frame->linesize, 0, v->frame->height,
+                sws_scale(v->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height,
                           v->rgb->data, v->rgb->linesize);
                 v->shown = index;
                 v->shown_us = us;

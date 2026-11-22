@@ -255,7 +255,9 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # ---- films -----------------------------------------------------------------
     for fmt, codec, container, acodec in (("HEVC", "hevc", "mp4", "aac"), ("WMV ", "wmv2", "asf", "wmav2")):
-        for w, h, pixels, sound in ((160, 120, me.PIX_RGB, True), (161, 121, me.PIX_ARGB, False)):
+        # 640x480: big enough for a graphics card's encoder (OPENSERVICE_HWACCEL=vaapi, test_media_vaapi.py)
+        for w, h, pixels, sound in ((160, 120, me.PIX_RGB, True), (161, 121, me.PIX_ARGB, False),
+                                    (640, 480, me.PIX_RGB, True)):
             frames = ff("-f", "lavfi", "-i", f"gradients=size={w + 1}x{h + 1}:rate=25:duration=2:speed=0.05:seed=5,"
                         f"format=rgb24,crop={w}:{h}:0:0", "-f", "rawvideo",
                         "-pix_fmt", "argb" if pixels == me.PIX_ARGB else "rgb24", "-")
