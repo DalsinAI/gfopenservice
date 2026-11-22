@@ -31,8 +31,10 @@
  *     RECT event says so. The RTG surface the design falls to (stage c) is
  *     not here yet. RTG_SURFACE and CHIPSET are ACM_E_FORMAT.
  *   - ACM_FRAME gives YUV420 (planar: Y at pitch, then U and V at pitch / 2)
- *     at the decoded size; other formats or sizes are ACM_E_FORMAT (the
- *     conversions and scaling are stage c).
+ *     at the decoded size, or ARGB32 (A, R, G, B bytes, A 255) at any size up
+ *     to 4096 x 4096, scaled here: what a player with no plane (the x86's
+ *     Radeon has none) draws into its window. BT.709 from 720 rows up, BT.601
+ *     below, limited range. Other formats are ACM_E_FORMAT.
  *   - sources: whatever the runtime's source hook opens (ACM_SRC_ACFS);
  *     ACM_FEED is ACM_E_BADARG (no feed session in the core).
  *   - CONTROL: PLAY, PAUSE, STOP (paused at the start), SEEK, RATE (1/16 to
@@ -45,7 +47,8 @@
  *   AC_ACMEDIA_HW=0    no hardware decoders
  *   AC_ACMEDIA_DENY    tags the policy refuses, comma separated ("HEVC,AV1")
  *   AC_ACMEDIA_HWONLY  tags allowed only on a hardware decoder
- *   AC_VIDEO_SOCK      acscreen's video socket, for PLANE
+ *   AC_VIDEO_SOCK      acscreen's video socket, for PLANE (read again at the first
+ *                      PLANE open if it wasn't set at load: the runtime sets it then)
  * Team 6, 12 Nov 2026. MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
@@ -73,6 +76,7 @@ uint32_t acm_tag_parse(const char *s);
 #define RT_AUDIO_QUEUE 8             /* about 170 ms at the worker's usual 1024/48 kHz blocks */
 #define RT_AUDIO_IDLE_NS 500000000ull /* abandon only an unread tail, not active playback */
 #define RT_AUDIO_AHEAD_MS 500         /* bound a buffering guest ahead of due video */
+static int machine_av_ms(void);
 #define RT_NEXT_MS 10000              /* the watchdog on one frame */
 #define RT_ASK_MS 2000
 #define RT_POOL_MAX (768ull << 20)     /* the worker uses the same total cap */
@@ -130,6 +134,8 @@ struct sess {
     struct acm_frame nf;
     int nfds, fds[ACM_MAX_FDS];
     uint64_t base_ns;
+    int32_t av_ms;                       /* AVDELAY: -1 the machine's (AC_ACMEDIA_AV_MS) */
+    int32_t av_used;                     /* the delay in base_ns */
     int64_t base_pts;
     int based;
     int veof, aeof;
@@ -425,6 +431,14 @@ static void sess_plane(struct sess *s) {
     if (s->vkind == ACMG_OUT_PLANE) {
         char why[160];
         route = ACMG_ROUTE_GUEST;
+        /* the socket as the runtime found it after loading this library (a1200native sets AC_VIDEO_SOCK
+         * from acscreen's FB name): read at the first PLANE open when it wasn't there at load */
+        pthread_mutex_lock(&R.mu);
+        if (!R.vsock[0]) {
+            const char *vs = getenv("AC_VIDEO_SOCK");
+            if (vs && *vs && strcmp(vs, "0")) snprintf(R.vsock, sizeof R.vsock, "%s", vs);
+        }
+        pthread_mutex_unlock(&R.mu);
         if (s->op.video >= 0 && R.vsock[0] && !acm_plane_open(&s->pl, R.vsock, why, sizeof why)) {
             s->plane = 1;
             acm_plane_rect(&s->pl, &s->rect);
@@ -594,7 +608,10 @@ static void step(struct sess *s) {
         static __thread uint8_t buf[sizeof(struct acm_frame) + 256];
         uint32_t want = ACM_WANT_VIDEO | (s->plane && s->pl.on ? ACM_WANT_DMABUF : 0);
         s->nfds = 0;
-        int r = acm_ask(&s->w, ACM_Q_NEXT, &(struct acm_next){ want, 0 }, sizeof(struct acm_next), NULL, 0, &t, buf, sizeof buf, &len,
+        /* The film in a window on the plane: the worker shrinks it when it is shown at less than half its size */
+        uint32_t fit = s->plane && s->pl.on && s->rect.space == ACV_SPACE_RTG && s->rect.w && s->rect.h
+                     ? ACM_NEXT_FIT(s->rect.w, s->rect.h) : 0;
+        int r = acm_ask(&s->w, ACM_Q_NEXT, &(struct acm_next){ want, fit }, sizeof(struct acm_next), NULL, 0, &t, buf, sizeof buf, &len,
                         s->fds, &s->nfds, RT_NEXT_MS);
         if (!r && t != ACM_A_FRAME) {
             for (int i = 0; i < s->nfds; i++) close(s->fds[i]);
@@ -628,7 +645,16 @@ static void step(struct sess *s) {
         }
     }
     int64_t pts = s->nf.pts_ms < 0 ? s->pos_ms : s->nf.pts_ms;
-    if (!s->based) { s->base_ns = now_ns(); s->base_pts = pts; s->based = 1; }
+    if (!s->based) {
+        /* The sound reaches the speaker later than it is read: the guest's AHI buffers, then the host's. The
+         * pictures wait as long (AC_ACMEDIA_AV_MS, the machine's; 22 Nov 2026 PiMiga: about 300 ms). */
+        pthread_mutex_lock(&s->mu);
+        int av = s->av_ms >= 0 ? s->av_ms : machine_av_ms();
+        s->av_used = av;
+        pthread_mutex_unlock(&s->mu);
+        s->base_ns = now_ns() + (s->op.audio >= 0 ? (uint64_t)av * 1000000ull : 0);
+        s->base_pts = pts; s->based = 1;
+    }
     uint32_t rate = s->rate ? s->rate : 65536;
     int64_t dt = pts - s->base_pts;
     uint64_t due = s->base_ns + (uint64_t)(dt > 0 ? dt : 0) * 1000000ull * 65536ull / rate;
@@ -674,6 +700,14 @@ static void step(struct sess *s) {
     s->nfds = 0;
     if (had) acm_plane_release(&s->w, old);
     if (mask & ACMG_EVM(ACMG_EV_FRAME)) post(s->handle, ACMG_EV_FRAME, (uint32_t)pts, 0);
+}
+
+/* The machine's picture delay (its hardware template: AC_ACMEDIA_AV_MS) */
+static int machine_av_ms(void)
+{
+    static int av = -1;
+    if (av < 0) { const char *e = getenv("AC_ACMEDIA_AV_MS"); av = e ? atoi(e) : 0; if (av < 0 || av > 2000) av = 0; }
+    return av;
 }
 
 static void *sess_main(void *a) {
@@ -745,7 +779,7 @@ static int32_t be_open(void *ctx, uint32_t slot, uint32_t handle, const uint8_t 
     struct sess *s = calloc(1, sizeof *s);
     if (!s) return ACM_E_LIMIT;
     s->rt = &R; s->slot = slot; s->handle = handle; s->streams = streams; s->vkind = vk; s->akind = ak; s->flags = flags; s->fd = -1;
-    s->rate = 65536; s->volume = 65536; s->state = ACM_STATE_OPENING;
+    s->rate = 65536; s->volume = 65536; s->state = ACM_STATE_OPENING; s->av_ms = -1;
     s->evmask = flags & ACMG_OF_EVENTS_FRAME ? ACMG_EVM(ACMG_EV_FRAME) : 0;
     s->rect.space = ACV_SPACE_RTG; s->rect.visible = 1;
     if (vk == ACMG_OUT_PLANE) {
@@ -826,6 +860,11 @@ static int32_t be_control(void *ctx, uint32_t slot, uint32_t cmd, const uint32_t
         r = queue(s, C_RECT, 0, 0);
         break;
     case ACMG_CTL_EVENTS: s->evmask = a[0]; break;
+    case ACMG_CTL_AVDELAY:                        /* the player's own (its icon's AVDELAY), at once */
+        if (a[0] > 2000) { r = ACM_E_BADARG; break; }
+        if (s->based && s->op.audio >= 0) s->base_ns += ((int64_t)a[0] - s->av_used) * 1000000ll;
+        s->av_ms = (int32_t)a[0]; s->av_used = (int32_t)a[0];
+        break;
     default: r = ACM_E_BADARG; break;             /* SELECT, TARGET: not in the core */
     }
     pthread_mutex_unlock(&s->mu);
@@ -871,21 +910,62 @@ static int source_frame_ok(const struct sess *s, const struct acm_frame *f) {
     return 1;
 }
 
+#define RT_ARGB_MAX 4096u
+static uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+/* f (YUV420P or NV12, checked) at w x h ARGB32 into out (pitch bytes a row): each pixel the source's nearest
+ * to its centre. Limited range; BT.709's matrix from 720 rows up, BT.601's below. 16.16 fixed point. */
+static void to_argb(const uint8_t *base, const struct acm_frame *f, uint8_t *out, uint32_t pitch, uint32_t w, uint32_t h) {
+    uint32_t fw = f->width, fh = f->height;
+    int hd = fh >= 720;
+    int cr = hd ? 103206 : 91881, cgu = hd ? 12276 : 22554, cgv = hd ? 30679 : 46802, cb = hd ? 121609 : 116130;   /* x 65536 */
+    static __thread uint32_t xs[RT_ARGB_MAX];
+    for (uint32_t x = 0; x < w; x++) { uint32_t sx = (uint32_t)(((uint64_t)(2 * x + 1) * fw) / (2 * w)); xs[x] = sx < fw ? sx : fw - 1; }
+    const uint8_t *Y = base + f->offset[0], *U = base + f->offset[1], *V = f->pixfmt == ACM_PIX_YUV420P ? base + f->offset[2] : NULL;
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t sy = (uint32_t)(((uint64_t)(2 * y + 1) * fh) / (2 * h)); if (sy >= fh) sy = fh - 1;
+        const uint8_t *yr = Y + (size_t)sy * f->pitch[0], *ur = U + (size_t)(sy / 2) * f->pitch[1];
+        const uint8_t *vr = V ? V + (size_t)(sy / 2) * f->pitch[2] : NULL;
+        uint8_t *o = out + (size_t)y * pitch;
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t sx = xs[x], cx = sx / 2;
+            int yy = (yr[sx] - 16) * 76309;                          /* 255/219 x 65536 */
+            int u = (V ? ur[cx] : ur[2 * cx]) - 128, v = (V ? vr[cx] : ur[2 * cx + 1]) - 128;
+            o[0] = 255;
+            o[1] = clamp8((yy + cr * v + 32768) >> 16);
+            o[2] = clamp8((yy - cgu * u - cgv * v + 32768) >> 16);
+            o[3] = clamp8((yy + cb * u + 32768) >> 16);
+            o += 4;
+        }
+    }
+}
+
 static int32_t be_frame(void *ctx, uint32_t slot, uint8_t *out, uint32_t len, uint32_t pitch, uint32_t format, uint32_t w, uint32_t h) {
     (void)ctx;
     struct sess *s = get(slot);
     if (!s) return ACM_E_NOSUCH;
-    if (format != ACMG_PIX_YUV420) return ACM_E_FORMAT;          /* the conversions are stage c */
+    if (format != ACMG_PIX_YUV420 && format != ACMG_PIX_ARGB32) return ACM_E_FORMAT;
+    if (format == ACMG_PIX_ARGB32 && (w > RT_ARGB_MAX || h > RT_ARGB_MAX)) return ACM_E_TOOBIG;
     pthread_mutex_lock(&s->mu);
     int32_t r;
     if (s->state == ACM_STATE_ERROR) r = ACM_E_DECODER;
-    else if (s->opened && ((w && w != s->op.width) || (h && h != s->op.height))) r = ACM_E_FORMAT;   /* no scaling in the core */
+    else if (format == ACMG_PIX_YUV420 && s->opened && ((w && w != s->op.width) || (h && h != s->op.height))) r = ACM_E_FORMAT;   /* YUV: no scaling */
     else if (s->vroute == ACMG_ROUTE_PLANE) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;   /* the frames are acscreen's */
     else if (!s->ready || s->taken) r = s->state == ACM_STATE_ENDED ? ACM_E_EOF : ACM_E_AGAIN;
     else {
         const struct acm_frame *f = &s->rf;
         if (!source_frame_ok(s, f)) r = ACM_E_DECODER;
-        else {
+        else if (format == ACMG_PIX_ARGB32) {
+            uint32_t ow = w ? w : f->width, oh = h ? h : f->height;
+            if (!pitch) pitch = 4 * ow;
+            if (ow > RT_ARGB_MAX || oh > RT_ARGB_MAX) r = ACM_E_TOOBIG;
+            else if (pitch < 4 * ow) r = ACM_E_BADARG;
+            else if ((uint64_t)pitch * (oh - 1) + 4ull * ow > len) r = ACM_E_TOOBIG;
+            else {
+                to_argb(s->w.pool + (size_t)f->slot * s->w.slot_size, f, out, pitch, ow, oh);
+                s->taken = 1;
+                r = (int32_t)(f->pts_ms < 0 ? 0 : f->pts_ms > 0x7fffffff ? 0x7fffffff : f->pts_ms);
+            }
+        } else {
             uint32_t fw = f->width, fh = f->height, cw = (fw + 1) / 2, chh = (fh + 1) / 2;
             if (!pitch) pitch = fw;
             if ((w && w != fw) || (h && h != fh)) r = ACM_E_FORMAT;   /* no scaling in the core */

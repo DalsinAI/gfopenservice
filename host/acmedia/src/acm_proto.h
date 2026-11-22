@@ -139,7 +139,12 @@ struct acm_pool { uint64_t size; uint32_t slot_size, nslots; };
 #define ACM_WANT_VIDEO   1u
 #define ACM_WANT_AUDIO   2u
 #define ACM_WANT_DMABUF  4u   /* a hardware frame as dma-buf fds, not copied into the pool */
-struct acm_next { uint32_t want, pad; };
+/* fit: the size the film is shown at, w << 16 | h (0: not known, or shown at the film's own size). When the
+ * picture would be shrunk to less than half of that, the worker shrinks it itself (area-averaged) and sends a
+ * pool frame of that size, dma-buf or not: a display scaler (the Pi's HVS) shrinking 1080p into a window rings,
+ * halos round every edge (22 Nov 2026, PiMiga). */
+struct acm_next { uint32_t want, fit; };
+#define ACM_NEXT_FIT(w, h) ((uint32_t)((w) & 0xffff) << 16 | (uint32_t)((h) & 0xffff))
 
 #define ACM_FF_COPIED   1u   /* the frame was copied into the pool (not decoded there) */
 #define ACM_FF_HW       2u   /* a hardware decoder made it */

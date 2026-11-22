@@ -423,8 +423,9 @@ int main(int argc, char **argv) {
     CHECK(wait_ev(h, ACMG_EV_FRAME, &from, 3000, &e) >= 0, "FRAME events (ACM_OF_EVENTS_FRAME)");
     int32_t pts = B->frame(B->ctx, 1, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48);
     CHECK(pts >= 0 && pts % 40 == 0 && frame_ok(fb, 64, 48, 64, (uint32_t)pts / 40), "FRAME: the frame of its pts, byte for byte (pts %d)", pts);
-        CHECK(B->frame(B->ctx, 1, fb, sizeof fb, 64, ACMG_PIX_ARGB32, 64, 48) == ACM_E_FORMAT, "FRAME as ARGB32: ACM_E_FORMAT (stage c)");
-    CHECK(B->frame(B->ctx, 1, fb, sizeof fb, 64, ACMG_PIX_YUV420, 32, 24) == ACM_E_FORMAT, "FRAME at another size: ACM_E_FORMAT (no scaling)");
+    CHECK(B->frame(B->ctx, 1, fb, sizeof fb, 64, ACMG_PIX_RGB16, 64, 48) == ACM_E_FORMAT, "FRAME as RGB16: ACM_E_FORMAT");
+    CHECK(B->frame(B->ctx, 1, fb, sizeof fb, 0, ACMG_PIX_ARGB32, 5000, 10) == ACM_E_TOOBIG, "FRAME as ARGB32 over 4096 wide: ACM_E_TOOBIG");
+    CHECK(B->frame(B->ctx, 1, fb, sizeof fb, 64, ACMG_PIX_YUV420, 32, 24) == ACM_E_FORMAT, "FRAME as YUV420 at another size: ACM_E_FORMAT (no scaling)");
     CHECK(B->control(B->ctx, 1, ACMG_CTL_PAUSE, a4) == 0, "PAUSE");
     usleep(150000);
     r = B->info(B->ctx, 1, out, sizeof out);
@@ -447,6 +448,25 @@ int main(int argc, char **argv) {
     CHECK(wait_ev(h, ACMG_EV_FRAME, &from, 3000, &e) >= 0 && e.a >= 200, "frames from the seek on (%u)", e.a);
     pts = B->frame(B->ctx, 1, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48);
     CHECK(pts == ACM_E_AGAIN || (pts >= 200 && frame_ok(fb, 64, 48, 64, (uint32_t)pts / 40)), "FRAME after the seek (%d)", pts);
+    {   /* ARGB32 at half the size: each pixel the source's (2x+1, 2y+1), BT.601, opaque */
+        static uint8_t ab[32 * 24 * 4];
+        int32_t ap = ACM_E_AGAIN;
+        for (int tries = 0; tries < 300 && ap == ACM_E_AGAIN; tries++) {
+            ap = B->frame(B->ctx, 1, ab, sizeof ab, 32 * 4, ACMG_PIX_ARGB32, 32, 24);
+            if (ap == ACM_E_AGAIN) usleep(5000);
+        }
+        int good = ap >= 0;
+        uint32_t k = ap >= 0 ? (uint32_t)ap / 40 : 0;
+        for (uint32_t y = 0; good && y < 24; y++) for (uint32_t x = 0; good && x < 32; x++) {
+            int Y = (uint8_t)(k + (2 * y + 1) + (2 * x + 1)), U = (uint8_t)k, V = (uint8_t)~k;
+            int yy = (Y - 16) * 76309, u = U - 128, v = V - 128;
+            int R = (yy + 91881 * v + 32768) >> 16, G = (yy - 22554 * u - 46802 * v + 32768) >> 16, Bl = (yy + 116130 * u + 32768) >> 16;
+            R = R < 0 ? 0 : R > 255 ? 255 : R; G = G < 0 ? 0 : G > 255 ? 255 : G; Bl = Bl < 0 ? 0 : Bl > 255 ? 255 : Bl;
+            const uint8_t *px = ab + (y * 32 + x) * 4;
+            good = px[0] == 255 && px[1] == R && px[2] == G && px[3] == Bl;
+        }
+        CHECK(good, "FRAME as ARGB32 at 32x24: the source's pixels, converted (pts %d)", ap);
+    }
     CHECK(wait_ev(h, ACMG_EV_END, &from, 3000, &e) >= 0 && e.a == 360, "END, at the last frame's time (%u)", e.a);
     B->frame(B->ctx, 1, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48);
     CHECK(B->frame(B->ctx, 1, fb, sizeof fb, 64, ACMG_PIX_YUV420, 64, 48) == ACM_E_EOF, "FRAME at the end: ACM_E_EOF");
