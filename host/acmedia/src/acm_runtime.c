@@ -47,7 +47,8 @@
  *   AC_ACMEDIA_HW=0    no hardware decoders
  *   AC_ACMEDIA_DENY    tags the policy refuses, comma separated ("HEVC,AV1")
  *   AC_ACMEDIA_HWONLY  tags allowed only on a hardware decoder
- *   AC_VIDEO_SOCK      acscreen's video socket, for PLANE
+ *   AC_VIDEO_SOCK      acscreen's video socket, for PLANE (read again at the first
+ *                      PLANE open if it wasn't set at load: the runtime sets it then)
  * Team 6, 12 Nov 2026. MIT, Copyright (c) 2026 AmiCradle Team.
  */
 #define _GNU_SOURCE
@@ -427,6 +428,14 @@ static void sess_plane(struct sess *s) {
     if (s->vkind == ACMG_OUT_PLANE) {
         char why[160];
         route = ACMG_ROUTE_GUEST;
+        /* the socket as the runtime found it after loading this library (a1200native sets AC_VIDEO_SOCK
+         * from acscreen's FB name): read at the first PLANE open when it wasn't there at load */
+        pthread_mutex_lock(&R.mu);
+        if (!R.vsock[0]) {
+            const char *vs = getenv("AC_VIDEO_SOCK");
+            if (vs && *vs && strcmp(vs, "0")) snprintf(R.vsock, sizeof R.vsock, "%s", vs);
+        }
+        pthread_mutex_unlock(&R.mu);
         if (s->op.video >= 0 && R.vsock[0] && !acm_plane_open(&s->pl, R.vsock, why, sizeof why)) {
             s->plane = 1;
             acm_plane_rect(&s->pl, &s->rect);
