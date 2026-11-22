@@ -100,6 +100,25 @@ Pictures are at most 8192 a side (one HEVC picture, no grid), films 4096.
 A HEIC's colour is said twice, in the HEVC's VUI and in an `nclx` `colr`
 box: sRGB primaries and transfer, BT.601 matrix, full range (as JPEG).
 
+## On the graphics card (VA-API)
+
+`OPENSERVICE_HWACCEL=vaapi` (AmiCradle's hardware template sets it where
+the card has a VA-API encoder) sends an HEVC film of at least 256x256 to the
+card (`hevc_vaapi`, constant QP at the CRF x265 would get) when the host's
+ffmpeg has that encoder. Each film the card writes is checked before it is
+given out: one frame (the 11th) decoded back and compared with the Amiga's
+pixels for it. A mean squared error over 65 (under 30 dB), a film the card
+refuses, or one under 256x256: encoded again on the CPU (x265). The check
+is there because a card can say it worked and write noise: an RX 560 with
+Ubuntu 24.04's Mesa and FFmpeg 6.1 gave 5 to 9 dB, where the x86 appliance's
+RX 580 with Debian 13's gives 40 and more; and under a card's minimum (the
+RX 580 takes nothing under 128 lines) an older ffmpeg doesn't refuse.
+`OPENSERVICE_VAAPI_DEVICE` names the render node (default
+`/dev/dri/renderD128`). Each film logs where it went, on stderr
+(`media.encode: HEVC film 640x480 encoded on the graphics card
+(hevc_vaapi)`). HEIC pictures stay on x265. `host/test_media_vaapi.py` runs
+the encode and video tests with the card asked for.
+
 ## Where it runs
 
 - **The LAN Cradle**: `cradle/nursery_host.py` offers `media.encode/1` when

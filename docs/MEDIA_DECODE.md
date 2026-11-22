@@ -159,6 +159,26 @@ most 50 a second, each picture repeated for as long as it lasts. `frames`
 and the rate VOPEN gives count those steady frames, so the Amiga plays
 them by its clock as it plays any video.
 
+### On the graphics card (VA-API)
+
+`OPENSERVICE_HWACCEL=vaapi` decodes video on the host's graphics card where
+it can (AmiCradle's hardware template sets it on a machine with a VA-API
+video engine, such as the x86 appliance's RX 580). `OPENSERVICE_VAAPI_DEVICE`
+names the render node (default: VA-API's own, `/dev/dri/renderD128`). A
+codec the card can't decode, no device, or no driver: the CPU, as before.
+The first frame of each video logs where it was decoded, on stderr:
+`media.decode: h264 1920x1080 decoded on the graphics card (VA-API)` or
+`... decoded on the CPU (the card can't do this one)`. Pictures stay on the
+CPU. The frames are the same either way (`host/test_media_vaapi.py`).
+
+On the RX 580 (UVD 6, Mesa 25.0.7) H.264 and HEVC decode on the card, and
+MPEG-4, VP9 and AV1 on the CPU (tested); vainfo lists MPEG-2 and VC-1 for
+the card too (not tested here; WMV 7 and 8 are not VC-1). A 1080p film at 30 fps, every
+frame to 640x360: H.264 1.7 s of CPU for 300 frames (3.0 s on the CPU
+alone), HEVC 1.6 s (4.2 s), so the cores stay free for the Amiga. The
+frames come back from the card at full size and are scaled on the CPU,
+which caps it at about 130 frames a second (the CPU alone: 280).
+
 ### HAM8
 
 VFRAME with `extra[1]` = 2 answers for an AGA screen in hold-and-modify:

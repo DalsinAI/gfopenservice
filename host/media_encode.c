@@ -7,7 +7,9 @@
  * their licences stay in that program. The result is handed out in pieces
  * by READ.
  *
- *   OPENSERVICE_FFMPEG  the ffmpeg program (default: ffmpeg on PATH)
+ *   OPENSERVICE_FFMPEG        the ffmpeg program (default: ffmpeg on PATH)
+ *   OPENSERVICE_HWACCEL       vaapi: HEVC films on the graphics card, each checked (below)
+ *   OPENSERVICE_VAAPI_DEVICE  the card's render node (default /dev/dri/renderD128)
  *
  * MIT, Copyright (c) 2026 AmiCradle Team.
  */
@@ -81,6 +83,7 @@ static int listed(const char *list, const char *name)
 }
 
 static struct {
+    int hevc_vaapi;            /* the program has hevc_vaapi: a film may go to the graphics card */
     char program[512];
     uint32_t list[8];
     uint32_t count;
@@ -105,6 +108,7 @@ static void find_formats(void)
     mux = hr_run_read(argv, NULL);
     if (enc && mux) {
         x265 = listed(enc, "libx265");
+        offered.hevc_vaapi = listed(enc, "hevc_vaapi");
         aac = listed(enc, "aac");
         wmav2 = listed(enc, "wmav2");
         wmv2 = listed(enc, "wmv2");
@@ -480,17 +484,113 @@ static int finish_sound(struct job *j, const char *out)
     return run(&a);
 }
 
+/* OPENSERVICE_HWACCEL=vaapi (the machine's hardware template writes it where
+ * the graphics card has a VA-API encoder: the x86 appliance's RX 580, VCE 3)
+ * sends an HEVC film to the card (hevc_vaapi), when this host's ffmpeg has
+ * it and the film is at least 256x256. A run the card refuses is run again on
+ * the CPU (x265), as before.
+ * Pictures stay on x265: one frame, where its quality counts most.
+ * OPENSERVICE_VAAPI_DEVICE names the render node (default /dev/dri/renderD128). */
+static const char *vaapi_node(void)
+{
+    const char *node = getenv("OPENSERVICE_VAAPI_DEVICE");
+    return node && *node ? node : "/dev/dri/renderD128";
+}
+
+/* A card's encoder can say it worked and write a film that decodes as noise
+ * (an RX 560 with Mesa and FFmpeg 6.1 as Ubuntu 24.04 has them, 22 Nov 2026:
+ * 5 to 9 dB, where the RX 580 with Debian 13's gives 40). So each film the
+ * card writes is checked: one frame decoded back and compared with the
+ * Amiga's own pixels for it. A mean squared error over 65 (under 30 dB) and
+ * the film is encoded again on the CPU. */
+static int film_checks_out(const struct job *j, const char *out)
+{
+    size_t fb = (size_t)j->width * j->height * (j->pixels == ME_PIX_ARGB ? 4 : 3), rgb = (size_t)j->width * j->height * 3;
+    char path[340], pick[200];
+    struct args a;
+    struct stat sb;
+    uint8_t *src = NULL, *got = NULL;
+    size_t gn = 0, k = 0, frames;
+    double sum = 0;
+    FILE *f;
+    int ok = 0;
+
+    snprintf(path, sizeof path, "%s/pixels.raw", j->dir);
+    if (stat(path, &sb) || !fb || (frames = (size_t)sb.st_size / fb) == 0)
+        return 0;
+    k = frames > 10 ? 10 : frames / 2;
+    if (!(src = malloc(fb)) || !(f = fopen(path, "rb"))) {
+        free(src);
+        return 0;
+    }
+    if (fseeko(f, (off_t)(k * fb), SEEK_SET) || fread(src, 1, fb, f) != fb) {
+        fclose(f);
+        free(src);
+        return 0;
+    }
+    fclose(f);
+    start(&a);
+    arg(&a, "-i"); arg(&a, "%s", out);
+    snprintf(pick, sizeof pick, "format=rgb24,crop=%u:%u:0:0,select=eq(n\\,%zu)", j->width, j->height, k);
+    arg(&a, "-vf"); arg(&a, "%s", pick);
+    arg(&a, "-frames:v"); arg(&a, "1");
+    arg(&a, "-f"); arg(&a, "rawvideo"); arg(&a, "-pix_fmt"); arg(&a, "rgb24"); arg(&a, "-");
+    got = (uint8_t *)hr_run_read(a.v, &gn);
+    if (got && gn == rgb) {
+        int argb = j->pixels == ME_PIX_ARGB;
+        for (size_t i = 0, p = 0; i < rgb; i += 3, p += argb ? 4 : 3)
+            for (int c = 0; c < 3; c++) {
+                double d = (double)got[i + c] - src[p + argb + c];
+                sum += d * d;
+            }
+        ok = sum / (double)rgb <= 255.0 * 255.0 / 1000.0;     /* 30 dB */
+        if (!ok)
+            fprintf(stderr, "media.encode: HEVC film %ux%u from the graphics card decodes wrong (frame %zu: mean "
+                    "squared error %.0f, 30 dB is 65)\n", j->width, j->height, k, sum / (double)rgb);
+    }
+    free(src);
+    free(got);
+    return ok;
+}
+
+static int film_on_card(const struct job *j)
+{
+    const char *want = getenv("OPENSERVICE_HWACCEL");
+    /* only films at least the test pattern's size: under a card's minimum (the RX 580's 128 lines) an older
+     * ffmpeg doesn't refuse, and the card writes noise (an RX 560, FFmpeg 6.1, 22 Nov 2026: 160x120, 8 dB) */
+    return j->format != ME_FORMAT_WMV && j->width >= 256 && j->height >= 256 && want && !strcmp(want, "vaapi") &&
+           offered.hevc_vaapi;
+}
+
+static int finish_film_as(struct job *j, const char *out, int card);
+
 static int finish_film(struct job *j, const char *out)
+{
+    if (film_on_card(j)) {
+        if (finish_film_as(j, out, 1) == MD_OK && film_checks_out(j, out)) {
+            fprintf(stderr, "media.encode: HEVC film %ux%u encoded on the graphics card (hevc_vaapi)\n", j->width, j->height);
+            return MD_OK;
+        }
+        fprintf(stderr, "media.encode: HEVC film %ux%u: not from the card, encoded on the CPU (x265)\n", j->width,
+                j->height);
+    }
+    return finish_film_as(j, out, 0);
+}
+
+static int finish_film_as(struct job *j, const char *out, int card)
 {
     struct args a;
     char filter[300];
     int wmv = j->format == ME_FORMAT_WMV;
 
     start(&a);
+    if (card) {
+        arg(&a, "-vaapi_device"); arg(&a, "%s", vaapi_node());
+    }
     pixels_in(&a, j);
     if (j->bytes[ME_STREAM_SOUND])
         sound_in(&a, j);
-    even_pad(filter, sizeof filter, j, "format=yuv420p");
+    even_pad(filter, sizeof filter, j, card ? "format=nv12,hwupload" : "format=yuv420p");
     arg(&a, "-vf"); arg(&a, "%s", filter);
     arg(&a, "-map"); arg(&a, "0:v");
     if (j->bytes[ME_STREAM_SOUND]) {
@@ -500,6 +600,10 @@ static int finish_film(struct job *j, const char *out)
         arg(&a, "-c:v"); arg(&a, "wmv2");
         /* qscale 2 (best) to 31; 5 by default */
         arg(&a, "-q:v"); arg(&a, "%u", j->quality ? 31 - j->quality * 29 / 100 : 5);
+    } else if (card) {
+        arg(&a, "-c:v"); arg(&a, "hevc_vaapi");
+        arg(&a, "-qp"); arg(&a, "%u", crf(j));        /* constant QP, the card's nearest to x265's CRF */
+        arg(&a, "-tag:v"); arg(&a, "hvc1");
     } else {
         arg(&a, "-c:v"); arg(&a, "libx265");
         arg(&a, "-preset"); arg(&a, "fast");
